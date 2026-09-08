@@ -1,8 +1,4 @@
--- [[ ThanHub • Sambung Kata Solver ]] --
--- Ultra-Optimized Zero-Lag Edition (Multi-Tier Hash Buckets & Compact Mobile UI)
--- Handles 212,000+ Words with 0 Frame Drops (<0.1ms Search, Ultra Compact 60 FPS UI)
-
-local Players = game:GetService("Players")
+    local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -102,6 +98,33 @@ local function TambahKataKeKamus(clean)
         KamusBySuffix2[s2] = bs2
     end
     table.insert(bs2, clean)
+end
+
+-- Ekstraksi Prefix Pintar (Mendukung 1 huruf 'T', 2 huruf 'PI', format 'Hurufnya adalah: PI', dsb)
+local function EkstrakPrefix(str)
+    if not str or type(str) ~= "string" then return nil end
+    local clean = str:gsub("^%s*(.-)%s*$", "%1")
+    if #clean == 0 then return nil end
+
+    -- Pattern 1: Teks setelah titik dua (misal "Hurufnya adalah: PI", "Huruf: T", "Soal: KA")
+    local afterColon = clean:match(":%s*([%a]+)%s*$")
+    if afterColon and #afterColon >= 1 and #afterColon <= 4 then
+        return afterColon:lower()
+    end
+
+    -- Pattern 2: Dua huruf dipisah spasi (misal balok "P I")
+    local c1, c2 = clean:match("^([%a])%s+([%a])$")
+    if c1 and c2 then
+        return (c1 .. c2):lower()
+    end
+
+    -- Pattern 3: Standalone 1 sampai 3 huruf (misal "PI", "T", "BER")
+    local standalone = clean:match("^([%a][%a]?[%a]?)$")
+    if standalone then
+        return standalone:lower()
+    end
+
+    return nil
 end
 
 -- Pemenggalan suku kata terakhir bahasa Indonesia (KBBI)
@@ -693,6 +716,7 @@ end)
 BtnClear.MouseButton1Click:Connect(function()
     InputAkhiran.Text = ""
     currentAkhiran = ""
+    UpdateWordList()
 end)
 
 -- =========================================================================
@@ -1053,6 +1077,64 @@ local function ApplyDetectedPrefix(prefix)
 end
 
 -- =========================================================================
+-- ADVANCED GAME PREFIX SCANNER (Mendukung 1 Huruf, 2 Huruf 'PI', dsb)
+-- =========================================================================
+local function CariPrefixDiGame()
+    -- 1. Cari TextLabel di PlayerGui (khususnya yang berisi 'Hurufnya adalah:', 'Huruf:', atau WordServer)
+    for _, gui in ipairs(PlayerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui ~= ScreenGui then
+            for _, v in ipairs(gui:GetDescendants()) do
+                if v:IsA("TextLabel") and v.Visible and v.Text ~= "" then
+                    local text = v.Text
+                    if text:find("Hurufnya") or text:find("hurufnya") or text:find("Huruf") or text:find("Soal") or v.Name == "WordServer" then
+                        local p = EkstrakPrefix(text)
+                        if p then
+                            return p, v
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Cari di BillboardGui / SurfaceGui pada Character LocalPlayer (di atas kepala atau badan)
+    local char = LocalPlayer.Character
+    if char then
+        for _, v in ipairs(char:GetDescendants()) do
+            if v:IsA("BillboardGui") or v:IsA("SurfaceGui") then
+                for _, lbl in ipairs(v:GetDescendants()) do
+                    if (lbl:IsA("TextLabel") or lbl:IsA("TextButton")) and lbl.Text ~= "" then
+                        local p = EkstrakPrefix(lbl.Text)
+                        if p then
+                            return p, lbl
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Cari di Workspace (meja bermain aktif)
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:IsA("Model") or obj:IsA("Folder") then
+            local nameLower = obj.Name:lower()
+            if nameLower:find("table") or nameLower:find("meja") or nameLower:find("match") or nameLower:find("game") then
+                for _, v in ipairs(obj:GetDescendants()) do
+                    if v:IsA("TextLabel") and v.Text ~= "" and (v.Text:find("Hurufnya") or v.Name == "WordServer") then
+                        local p = EkstrakPrefix(v.Text)
+                        if p then
+                            return p, v
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+-- =========================================================================
 -- GAME EVENT LISTENERS
 -- =========================================================================
 
@@ -1105,18 +1187,28 @@ if MatchRemote then
     MatchRemote.OnClientEvent:Connect(function(action, value)
         if action == "StartTurn" then
             UpdateTurnDisplay(true, currentAwalan)
-            task.wait(0.6)
-            if deteksiPrefixEnabled then
-                pcall(function()
-                    local wordServer = PlayerGui:FindFirstChild("WordServer", true)
-                    if wordServer and wordServer.Text ~= "" then
-                        local pfx = wordServer.Text:gsub("%s+", ""):lower()
-                        if pfx ~= "" then
+
+            -- Cek value langsung jika dikirim remote
+            if typeof(value) == "string" and #value > 0 then
+                local p = EkstrakPrefix(value)
+                if p then
+                    ApplyDetectedPrefix(p)
+                end
+            end
+
+            -- Coba scan GUI dengan retry (0.1s, 0.2s, 0.3s, 0.5s)
+            task.spawn(function()
+                for _, delayTime in ipairs({0.1, 0.2, 0.3, 0.5}) do
+                    task.wait(delayTime)
+                    if deteksiPrefixEnabled then
+                        local pfx = CariPrefixDiGame()
+                        if pfx and pfx ~= "" then
                             ApplyDetectedPrefix(pfx)
+                            break
                         end
                     end
-                end)
-            end
+                end
+            end)
         elseif action == "EndTurn" or action == "GameEnd" then
             UpdateTurnDisplay(false, currentAwalan)
         end
@@ -1180,25 +1272,26 @@ task.spawn(function()
     UpdateWordList()
 end)
 
--- 5. Fallback GUI Scanner with Instance Caching
+-- 5. Fallback GUI Scanner with Instance Caching (Detects 1 letter 'T', 2 letters 'PI', etc)
 task.spawn(function()
-    local cachedWordServer = nil
-    while task.wait(0.8) do
+    local cachedLabel = nil
+    while task.wait(0.5) do
         if deteksiPrefixEnabled then
             pcall(function()
-                if not cachedWordServer or not cachedWordServer.Parent then
-                    local menuUI = PlayerGui:FindFirstChild("MenuUI") or PlayerGui:FindFirstChild("GameUI")
-                    if menuUI then
-                        cachedWordServer = menuUI:FindFirstChild("WordServer", true)
-                    else
-                        cachedWordServer = PlayerGui:FindFirstChild("WordServer", true)
+                if cachedLabel and cachedLabel.Parent and cachedLabel.Text ~= "" then
+                    local pfx = EkstrakPrefix(cachedLabel.Text)
+                    if pfx and pfx ~= "" and pfx ~= currentAwalan:lower() then
+                        ApplyDetectedPrefix(pfx)
                     end
-                end
-
-                if cachedWordServer and cachedWordServer:IsA("TextLabel") and cachedWordServer.Text ~= "" then
-                    local target = cachedWordServer.Text:gsub("%s+", ""):lower()
-                    if target ~= "" and target ~= currentAwalan:lower() then
-                        ApplyDetectedPrefix(target)
+                else
+                    local pfx, foundLabel = CariPrefixDiGame()
+                    if pfx and pfx ~= "" then
+                        if foundLabel then
+                            cachedLabel = foundLabel
+                        end
+                        if pfx ~= currentAwalan:lower() then
+                            ApplyDetectedPrefix(pfx)
+                        end
                     end
                 end
             end)

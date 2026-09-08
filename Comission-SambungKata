@@ -2,11 +2,11 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local Camera = workspace.CurrentCamera
 
--- Clean up any previous instances
 if game:GetService("CoreGui"):FindFirstChild("ThanHub_KataSolver_UI") then
     game:GetService("CoreGui").ThanHub_KataSolver_UI:Destroy()
 end
@@ -26,36 +26,35 @@ if not pcallGui or not ScreenGui.Parent then
     ScreenGui.Parent = PlayerGui
 end
 
--- Remotes
 local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10) or ReplicatedStorage:FindFirstChild("Remotes")
+local TurnCamera = RemotesFolder and (RemotesFolder:WaitForChild("TurnCamera", 5) or RemotesFolder:FindFirstChild("TurnCamera"))
 local UpdateWordIndex = RemotesFolder and (RemotesFolder:WaitForChild("UpdateWordIndex", 5) or RemotesFolder:FindFirstChild("UpdateWordIndex"))
 local RequestWordIndex = RemotesFolder and (RemotesFolder:WaitForChild("RequestWordIndex", 5) or RemotesFolder:FindFirstChild("RequestWordIndex"))
-local MatchRemote = RemotesFolder and (RemotesFolder:WaitForChild("MatchUI", 5) or RemotesFolder:FindFirstChild("MatchUI"))
 
--- State
 local currentAwalan = "t"
 local currentAkhiran = ""
 local deteksiPrefixEnabled = true
-local isMyTurn = true
+local isMyTurn = false
+local cameraTurnActive = false
 local isUpdatingInputProgrammatically = false
 
--- =========================================================================
--- HIGH PERFORMANCE DICTIONARY INDEXING (MULTI-TIER BUCKETS FOR <0.1ms SEARCH)
--- =========================================================================
-local KamusData = {}              -- Flat list of unique words
-local KamusSet = {}               -- O(1) deduplication set
-local KamusByLetter = {}          -- 1-letter prefix: ['t'] = { ... }
-local KamusByTwoLetters = {}       -- 2-letter prefix: ['ta'] = { ... }
-local KamusByThreeLetters = {}     -- 3-letter prefix: ['tak'] = { ... }
-local KamusBySuffix1 = {}          -- 1-letter suffix: ['i'] = { ... }
-local KamusBySuffix2 = {}          -- 2-letter suffix: ['an'] = { ... }
+local UpdateWordList
+local UpdateTurnDisplay
+local ApplyDetectedPrefix
+
+local KamusData = {}
+local KamusSet = {}
+local KamusByLetter = {}
+local KamusByTwoLetters = {}
+local KamusByThreeLetters = {}
+local KamusBySuffix1 = {}
+local KamusBySuffix2 = {}
 
 local function TambahKataKeKamus(clean)
     if #clean < 2 or KamusSet[clean] then return end
     KamusSet[clean] = true
     table.insert(KamusData, clean)
 
-    -- Prefix Buckets (1, 2, 3 letters)
     local l1 = clean:sub(1, 1)
     local b1 = KamusByLetter[l1]
     if not b1 then
@@ -82,7 +81,6 @@ local function TambahKataKeKamus(clean)
         table.insert(b3, clean)
     end
 
-    -- Suffix Buckets (1, 2 letters)
     local s1 = clean:sub(-1)
     local bs1 = KamusBySuffix1[s1]
     if not bs1 then
@@ -100,98 +98,51 @@ local function TambahKataKeKamus(clean)
     table.insert(bs2, clean)
 end
 
--- Ekstraksi Prefix Pintar (Mendukung 1 huruf 'T', 2 huruf 'PI', format 'Hurufnya adalah: PI', dsb)
 local function EkstrakPrefix(str)
     if not str or type(str) ~= "string" then return nil end
     local clean = str:gsub("^%s*(.-)%s*$", "%1")
     if #clean == 0 then return nil end
 
-    -- Pattern 1: Teks setelah titik dua (misal "Hurufnya adalah: PI", "Huruf: T", "Soal: KA")
     local afterColon = clean:match(":%s*([%a]+)%s*$")
-    if afterColon and #afterColon >= 1 and #afterColon <= 4 then
+    if afterColon and #afterColon >= 1 and #afterColon <= 8 then
         return afterColon:lower()
     end
 
-    -- Pattern 2: Dua huruf dipisah spasi (misal balok "P I")
-    local c1, c2 = clean:match("^([%a])%s+([%a])$")
-    if c1 and c2 then
-        return (c1 .. c2):lower()
+    local setelahHuruf = clean:match("[Hh]urufnya%s+adalah%s*([%a]+)")
+    if setelahHuruf and #setelahHuruf >= 1 and #setelahHuruf <= 8 then
+        return setelahHuruf:lower()
     end
 
-    -- Pattern 3: Standalone 1 sampai 3 huruf (misal "PI", "T", "BER")
-    local standalone = clean:match("^([%a][%a]?[%a]?)$")
-    if standalone then
-        return standalone:lower()
+    local c1, c2, c3, c4 = clean:match("^([%a])%s+([%a])%s+([%a])%s+([%a])$")
+    if c1 and c2 and c3 and c4 then
+        return (c1 .. c2 .. c3 .. c4):lower()
+    end
+    local d1, d2, d3 = clean:match("^([%a])%s+([%a])%s+([%a])$")
+    if d1 and d2 and d3 then
+        return (d1 .. d2 .. d3):lower()
+    end
+    local e1, e2 = clean:match("^([%a])%s+([%a])$")
+    if e1 and e2 then
+        return (e1 .. e2):lower()
+    end
+
+    local standalone = clean:match("^([%a]+)$")
+    if standalone and #standalone >= 1 and #standalone <= 8 then
+        local lower = standalone:lower()
+        local blacklist = {
+            waktu = true, combo = true, normal = true, turn = true,
+            skipturn = true, vip = true, lv = true, level = true,
+            bermain = true, menu = true, thanhub = true, enter = true,
+            salin = true, reset = true, auto = true, detect = true
+        }
+        if not blacklist[lower] then
+            return lower
+        end
     end
 
     return nil
 end
 
--- Pemenggalan suku kata terakhir bahasa Indonesia (KBBI)
-local function AmbilSukuKataTerakhir(kata)
-    if not kata or type(kata) ~= "string" then return "" end
-    kata = kata:gsub("%s+", ""):lower()
-    if #kata <= 2 then return kata end
-
-    local vowels = {a = true, e = true, i = true, o = true, u = true}
-    local vIndices = {}
-
-    for i = 1, #kata do
-        local c = kata:sub(i, i)
-        if vowels[c] then
-            table.insert(vIndices, i)
-        end
-    end
-
-    if #vIndices == 0 or #vIndices == 1 then
-        return kata
-    end
-
-    local lastV = vIndices[#vIndices]
-    local prevV = vIndices[#vIndices - 1]
-
-    local isDiphthong = (lastV == prevV + 1) and (lastV == #kata) and (kata:sub(prevV, lastV) == "ai" or kata:sub(prevV, lastV) == "au" or kata:sub(prevV, lastV) == "oi" or kata:sub(prevV, lastV) == "ei")
-
-    local targetV = lastV
-    local beforeV = prevV
-
-    if isDiphthong then
-        targetV = prevV
-        if #vIndices >= 3 then
-            beforeV = vIndices[#vIndices - 2]
-        else
-            beforeV = nil
-        end
-    end
-
-    if not beforeV then
-        local between = kata:sub(1, targetV - 1)
-        if #between <= 1 then
-            return kata
-        else
-            return kata:sub(#between)
-        end
-    end
-
-    local between = kata:sub(beforeV + 1, targetV - 1)
-    local startPos
-
-    if between == "ng" or between == "ny" or between == "sy" or between == "kh" then
-        startPos = beforeV + 1
-    elseif #between >= 3 and (between:sub(1, 2) == "ng" or between:sub(1, 2) == "ny" or between:sub(1, 2) == "sy" or between:sub(1, 2) == "kh") then
-        startPos = beforeV + 1 + 2
-    elseif #between == 0 then
-        startPos = targetV
-    elseif #between == 1 then
-        startPos = beforeV + 1
-    else
-        startPos = beforeV + 2
-    end
-
-    return kata:sub(startPos)
-end
-
--- Premium Obsidian & Emerald Color Palette
 local Palette = {
     ObsidianBase   = Color3.fromRGB(13, 15, 22),
     CardDark       = Color3.fromRGB(20, 23, 34),
@@ -206,16 +157,15 @@ local Palette = {
     TextSecondary  = Color3.fromRGB(130, 138, 162),
     TextMuted      = Color3.fromRGB(85, 92, 114),
     BadgeCycle     = {
-        Color3.fromRGB(0, 230, 160),   -- Emerald
-        Color3.fromRGB(255, 165, 38),  -- Amber Orange
-        Color3.fromRGB(255, 75, 140),  -- Electric Pink
-        Color3.fromRGB(0, 195, 255),   -- Sky Cyan
-        Color3.fromRGB(160, 90, 255),  -- Royal Violet
-        Color3.fromRGB(60, 230, 120)   -- Lime Green
+        Color3.fromRGB(0, 230, 160),
+        Color3.fromRGB(255, 165, 38),
+        Color3.fromRGB(255, 75, 140),
+        Color3.fromRGB(0, 195, 255),
+        Color3.fromRGB(160, 90, 255),
+        Color3.fromRGB(60, 230, 120)
     }
 }
 
--- Compact Responsive Viewport Sizing (Mobile Optimized)
 local function GetResponsiveSizes()
     local vp = Camera and Camera.ViewportSize or Vector2.new(1280, 720)
     local isMobile = (vp.Y < 500) or (vp.X < 850) or (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
@@ -233,9 +183,6 @@ end
 
 local baseW, baseH = GetResponsiveSizes()
 
--- =========================================================================
--- FLOATING TOGGLE BUTTON (COMPACT FAB FOR MOBILE)
--- =========================================================================
 local FloatingButton = Instance.new("Frame")
 FloatingButton.Name = "FloatingToggle"
 FloatingButton.Size = UDim2.new(0, 86, 0, 26)
@@ -262,7 +209,7 @@ FloatTrigger.Parent = FloatingButton
 local FloatDot = Instance.new("Frame")
 FloatDot.Size = UDim2.new(0, 6, 0, 6)
 FloatDot.Position = UDim2.new(0, 8, 0.5, -3)
-FloatDot.BackgroundColor3 = Palette.EmeraldAccent
+FloatDot.BackgroundColor3 = Palette.TextMuted
 FloatDot.BorderSizePixel = 0
 FloatDot.Parent = FloatingButton
 
@@ -281,7 +228,6 @@ FloatText.TextColor3 = Palette.TextPrimary
 FloatText.TextXAlignment = Enum.TextXAlignment.Left
 FloatText.Parent = FloatingButton
 
--- Floating Button Dragging
 local fDragging = false
 local fDragInput, fDragStart, fStartPos
 
@@ -312,9 +258,6 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
--- =========================================================================
--- MAIN WINDOW FRAME (COMPACT PROPORTIONS)
--- =========================================================================
 local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
 MainFrame.Size = UDim2.new(0, baseW, 0, baseH)
@@ -341,7 +284,6 @@ MainGradient.Color = ColorSequence.new({
 MainGradient.Rotation = 45
 MainGradient.Parent = MainFrame
 
--- Draggable Main Window
 local mDragging = false
 local mDragInput, mDragStart, mStartPos
 
@@ -372,7 +314,6 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
--- Viewport listener for orientation change
 if Camera then
     Camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
         local nw, nh = GetResponsiveSizes()
@@ -380,16 +321,12 @@ if Camera then
     end)
 end
 
--- =========================================================================
--- HEADER SECTION (COMPACT 34px)
--- =========================================================================
 local Header = Instance.new("Frame")
 Header.Name = "Header"
 Header.Size = UDim2.new(1, 0, 0, 34)
 Header.BackgroundTransparency = 1
 Header.Parent = MainFrame
 
--- Brand Badge
 local BrandBadge = Instance.new("Frame")
 BrandBadge.Size = UDim2.new(0, 20, 0, 20)
 BrandBadge.Position = UDim2.new(0, 8, 0.5, -10)
@@ -415,7 +352,6 @@ BrandIcon.TextSize = 10
 BrandIcon.TextColor3 = Palette.VioletAccent
 BrandIcon.Parent = BrandBadge
 
--- Header Title & Subtitle
 local TitleContainer = Instance.new("Frame")
 TitleContainer.Size = UDim2.new(1, -96, 1, 0)
 TitleContainer.Position = UDim2.new(0, 33, 0, 0)
@@ -440,13 +376,12 @@ SubtitleTurn.Size = UDim2.new(1, 0, 0, 13)
 SubtitleTurn.Position = UDim2.new(0, 0, 0, 18)
 SubtitleTurn.BackgroundTransparency = 1
 SubtitleTurn.Font = Enum.Font.GothamMedium
-SubtitleTurn.Text = "● Giliran kamu! [ T ]"
+SubtitleTurn.Text = "○ Menunggu giliran..."
 SubtitleTurn.TextSize = 8.5
-SubtitleTurn.TextColor3 = Palette.EmeraldAccent
+SubtitleTurn.TextColor3 = Palette.TextMuted
 SubtitleTurn.TextXAlignment = Enum.TextXAlignment.Left
 SubtitleTurn.Parent = TitleContainer
 
--- Header Controls
 local HeaderControls = Instance.new("Frame")
 HeaderControls.Size = UDim2.new(0, 48, 1, 0)
 HeaderControls.Position = UDim2.new(1, -54, 0, 0)
@@ -483,7 +418,6 @@ local BtnCloseCorner = Instance.new("UICorner")
 BtnCloseCorner.CornerRadius = UDim.new(0, 5)
 BtnCloseCorner.Parent = BtnClose
 
--- Divider
 local HeaderLine = Instance.new("Frame")
 HeaderLine.Size = UDim2.new(1, 0, 0, 1)
 HeaderLine.Position = UDim2.new(0, 0, 0, 34)
@@ -491,7 +425,6 @@ HeaderLine.BackgroundColor3 = Palette.StrokeSubtle
 HeaderLine.BorderSizePixel = 0
 HeaderLine.Parent = MainFrame
 
--- Content Container
 local ContentBody = Instance.new("Frame")
 ContentBody.Name = "ContentBody"
 ContentBody.Size = UDim2.new(1, 0, 1, -35)
@@ -499,7 +432,6 @@ ContentBody.Position = UDim2.new(0, 0, 0, 35)
 ContentBody.BackgroundTransparency = 1
 ContentBody.Parent = MainFrame
 
--- Minimize & Floating Toggle Actions
 local isMinimized = false
 BtnMin.MouseButton1Click:Connect(function()
     isMinimized = not isMinimized
@@ -516,7 +448,7 @@ end)
 local function ToggleMainWindow()
     MainFrame.Visible = not MainFrame.Visible
     if MainFrame.Visible then
-        FloatDot.BackgroundColor3 = Palette.EmeraldAccent
+        FloatDot.BackgroundColor3 = isMyTurn and Palette.EmeraldAccent or Palette.TextMuted
     else
         FloatDot.BackgroundColor3 = Palette.TextMuted
     end
@@ -525,9 +457,6 @@ end
 BtnClose.MouseButton1Click:Connect(ToggleMainWindow)
 FloatTrigger.MouseButton1Click:Connect(ToggleMainWindow)
 
--- =========================================================================
--- SEARCH CONTROLS (AWALAN & AKHIRAN COMPACT)
--- =========================================================================
 local SearchPanel = Instance.new("Frame")
 SearchPanel.Name = "SearchPanel"
 SearchPanel.Size = UDim2.new(1, -16, 0, 42)
@@ -535,7 +464,6 @@ SearchPanel.Position = UDim2.new(0, 8, 0, 5)
 SearchPanel.BackgroundTransparency = 1
 SearchPanel.Parent = ContentBody
 
--- AWALAN CARD (Left 48%)
 local AwalanCard = Instance.new("Frame")
 AwalanCard.Size = UDim2.new(0.48, 0, 1, 0)
 AwalanCard.Position = UDim2.new(0, 0, 0, 0)
@@ -577,7 +505,6 @@ InputAwalan.ClearTextOnFocus = false
 InputAwalan.TextXAlignment = Enum.TextXAlignment.Left
 InputAwalan.Parent = AwalanCard
 
--- AKHIRAN CARD (Right 48%)
 local AkhiranCard = Instance.new("Frame")
 AkhiranCard.Size = UDim2.new(0.48, 0, 1, 0)
 AkhiranCard.Position = UDim2.new(0.52, 0, 0, 0)
@@ -620,9 +547,6 @@ InputAkhiran.ClearTextOnFocus = false
 InputAkhiran.TextXAlignment = Enum.TextXAlignment.Left
 InputAkhiran.Parent = AkhiranCard
 
--- =========================================================================
--- TOOLBAR (AUTO-DETECT & RESET COMPACT)
--- =========================================================================
 local Toolbar = Instance.new("Frame")
 Toolbar.Name = "Toolbar"
 Toolbar.Size = UDim2.new(1, -16, 0, 24)
@@ -630,7 +554,6 @@ Toolbar.Position = UDim2.new(0, 8, 0, 51)
 Toolbar.BackgroundTransparency = 1
 Toolbar.Parent = ContentBody
 
--- Auto-Detect Prefix Chip
 local ChipDetect = Instance.new("TextButton")
 ChipDetect.Size = UDim2.new(0, 110, 1, 0)
 ChipDetect.Position = UDim2.new(0, 0, 0, 0)
@@ -671,7 +594,6 @@ ChipLabel.TextColor3 = Palette.EmeraldAccent
 ChipLabel.TextXAlignment = Enum.TextXAlignment.Left
 ChipLabel.Parent = ChipDetect
 
--- Clear Filters Button
 local BtnClear = Instance.new("TextButton")
 BtnClear.Size = UDim2.new(0, 48, 1, 0)
 BtnClear.Position = UDim2.new(1, -48, 0, 0)
@@ -700,6 +622,13 @@ local function SetDetectState(enabled)
         ChipDot.BackgroundColor3 = Palette.EmeraldAccent
         ChipStroke.Color = Palette.StrokeAccent
         ChipDetect.BackgroundColor3 = Palette.EmeraldGlowBg
+
+        if isMyTurn then
+            local pfx = CariPrefixDiLocalPlayer()
+            if pfx and pfx ~= "" then
+                ApplyDetectedPrefix(pfx)
+            end
+        end
     else
         ChipLabel.Text = "Auto-Detect: OFF"
         ChipLabel.TextColor3 = Palette.TextMuted
@@ -719,9 +648,6 @@ BtnClear.MouseButton1Click:Connect(function()
     UpdateWordList()
 end)
 
--- =========================================================================
--- STATUS PILL & COUNT BANNER (COMPACT 16px)
--- =========================================================================
 local StatusBanner = Instance.new("Frame")
 StatusBanner.Name = "StatusBanner"
 StatusBanner.Size = UDim2.new(1, -16, 0, 16)
@@ -739,9 +665,6 @@ BannerText.TextColor3 = Palette.TextSecondary
 BannerText.TextXAlignment = Enum.TextXAlignment.Left
 BannerText.Parent = StatusBanner
 
--- =========================================================================
--- LIVE WORD LIST WITH COMPACT RECYCLING POOL (ZERO LAG)
--- =========================================================================
 local ScrollingList = Instance.new("ScrollingFrame")
 ScrollingList.Name = "WordsList"
 ScrollingList.Size = UDim2.new(1, -16, 1, -100)
@@ -759,7 +682,6 @@ ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 ListLayout.Padding = UDim.new(0, 3)
 ListLayout.Parent = ScrollingList
 
--- UI Object Pool: Reuses existing compact instances
 local CardPool = {}
 
 local function GetOrCreateCard(index)
@@ -786,7 +708,6 @@ local function GetOrCreateCard(index)
     CardStroke.Thickness = 0.7
     CardStroke.Parent = Card
 
-    -- Badge Left (16x16)
     local Badge = Instance.new("Frame")
     Badge.Size = UDim2.new(0, 16, 0, 16)
     Badge.Position = UDim2.new(0, 5, 0.5, -8)
@@ -805,7 +726,6 @@ local function GetOrCreateCard(index)
     BadgeText.TextColor3 = Color3.fromRGB(255, 255, 255)
     BadgeText.Parent = Badge
 
-    -- Word Label (TextSize 10)
     local WordLabel = Instance.new("TextLabel")
     WordLabel.Size = UDim2.new(1, -66, 1, 0)
     WordLabel.Position = UDim2.new(0, 26, 0, 0)
@@ -816,7 +736,6 @@ local function GetOrCreateCard(index)
     WordLabel.TextXAlignment = Enum.TextXAlignment.Left
     WordLabel.Parent = Card
 
-    -- Copy Pill Indicator (Compact 36x16)
     local CopyTag = Instance.new("TextLabel")
     CopyTag.Size = UDim2.new(0, 36, 0, 16)
     CopyTag.Position = UDim2.new(1, -40, 0.5, -8)
@@ -831,7 +750,6 @@ local function GetOrCreateCard(index)
     CopyCorner.CornerRadius = UDim.new(0, 4)
     CopyCorner.Parent = CopyTag
 
-    -- Micro Animations on Hover
     Card.MouseEnter:Connect(function()
         TweenService:Create(Card, TweenInfo.new(0.1), {BackgroundColor3 = Palette.CardDarkHover}):Play()
         TweenService:Create(CardStroke, TweenInfo.new(0.1), {Color = Palette.StrokeAccent}):Play()
@@ -886,7 +804,6 @@ local function GetOrCreateCard(index)
     return cardData
 end
 
--- Pre-warm CardPool smoothly in background so searches take 0ms
 task.spawn(function()
     for i = 1, 150 do
         GetOrCreateCard(i)
@@ -896,10 +813,7 @@ task.spawn(function()
     end
 end)
 
--- =========================================================================
--- ULTRA FAST SEARCH ENGINE (<0.1ms Multi-Tier Bucket Lookups)
--- =========================================================================
-local function UpdateWordList()
+UpdateWordList = function()
     local awalan = currentAwalan:lower():gsub("%s+", "")
     local akhiran = currentAkhiran:lower():gsub("%s+", "")
 
@@ -915,7 +829,6 @@ local function UpdateWordList()
         return
     end
 
-    -- Fast bucket candidate selection (O(1) retrieval)
     local candidates
     local exactPrefix = false
 
@@ -948,7 +861,6 @@ local function UpdateWordList()
     local awalanLen = #awalan
     local akhiranLen = #akhiran
 
-    -- 1. Fast match on Awalan + Akhiran
     for i = 1, #candidates do
         local word = candidates[i]
         local match = true
@@ -969,7 +881,6 @@ local function UpdateWordList()
         end
     end
 
-    -- 2. Fallback: If requested Akhiran has 0 matches, redirect to other available words with the same prefix!
     if #results == 0 and #akhiran > 0 then
         isFallback = true
         for i = 1, #candidates do
@@ -987,7 +898,6 @@ local function UpdateWordList()
         end
     end
 
-    -- 3. Update status banner
     if isFallback then
         BannerText.Text = string.format("⚠️ Akhiran [ %s ] tidak ada! Dialihkan (%d kata)", akhiranDisp, #results)
         BannerText.TextColor3 = Color3.fromRGB(255, 185, 45)
@@ -999,21 +909,16 @@ local function UpdateWordList()
         BannerText.TextColor3 = Palette.TextSecondary
     end
 
-    -- 4. Instant UI update using object pool (ZERO INSTANCE CREATION!)
     for i = 1, #results do
         local card = GetOrCreateCard(i)
         card.SetWord(results[i], i)
     end
 
-    -- Hide remaining cards in the pool
     for i = #results + 1, #CardPool do
         CardPool[i].Hide()
     end
 end
 
--- =========================================================================
--- INPUT LISTENERS & TYPING DEBOUNCING
--- =========================================================================
 local searchDebounce = nil
 local function RequestSearch(delayTime)
     if searchDebounce then
@@ -1050,80 +955,137 @@ InputAkhiran.FocusLost:Connect(function()
     UpdateWordList()
 end)
 
--- Status UI Turn Updater
-local function UpdateTurnDisplay(isTurn, prefix)
+UpdateTurnDisplay = function(isTurn, prefix)
     isMyTurn = isTurn
-    local pfx = (prefix and prefix ~= "") and prefix:upper() or currentAwalan:upper()
+    local pfx = (prefix and prefix ~= "") and prefix:upper() or (currentAwalan ~= "" and currentAwalan:upper() or "—")
 
     if isTurn then
         SubtitleTurn.Text = "● Giliran kamu! [ " .. pfx .. " ]"
         SubtitleTurn.TextColor3 = Palette.EmeraldAccent
         FloatDot.BackgroundColor3 = Palette.EmeraldAccent
     else
-        SubtitleTurn.Text = "○ Menunggu giliran... [ " .. pfx .. " ]"
+        SubtitleTurn.Text = "○ Menunggu giliran..."
         SubtitleTurn.TextColor3 = Palette.TextMuted
         FloatDot.BackgroundColor3 = Palette.TextMuted
     end
 end
 
--- Prefix Application (Triggered by Remote or Detection)
-local function ApplyDetectedPrefix(prefix)
+ApplyDetectedPrefix = function(prefix)
     if not prefix or prefix == "" then return end
     prefix = prefix:gsub("%s+", ""):lower()
 
     SetAwalanSilently(prefix)
-    UpdateTurnDisplay(isMyTurn, prefix)
-    UpdateWordList() -- Instant update (0.05ms)
+    UpdateTurnDisplay(true, prefix)
+    UpdateWordList()
 end
 
--- =========================================================================
--- ADVANCED GAME PREFIX SCANNER (Mendukung 1 Huruf, 2 Huruf 'PI', dsb)
--- =========================================================================
-local function CariPrefixDiGame()
-    -- 1. Cari TextLabel di PlayerGui (khususnya yang berisi 'Hurufnya adalah:', 'Huruf:', atau WordServer)
+local function IsCameraFocusingOnMe()
+    local char = LocalPlayer.Character
+    if not char then return false end
+
+    local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    if not head then return false end
+
+    if Camera.CameraType ~= Enum.CameraType.Scriptable then
+        return false
+    end
+
+    local camPos = Camera.CFrame.Position
+    local headPos = head.Position
+    local dist = (camPos - headPos).Magnitude
+
+    if dist > 11.5 then
+        return false
+    end
+
+    local toHeadDir = (headPos - camPos).Unit
+    local camLook = Camera.CFrame.LookVector
+    local dot = camLook:Dot(toHeadDir)
+
+    if dot > 0.75 and dist < 11.0 then
+        return true
+    end
+
+    return false
+end
+
+local function IsGameKeyboardVisible()
+    local success, result = pcall(function()
+        for _, gui in ipairs(PlayerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui ~= ScreenGui and gui.Enabled then
+                local enterBtn = gui:FindFirstChild("Enter", true)
+                if enterBtn and enterBtn:IsA("GuiObject") and enterBtn.Visible then
+                    return true
+                end
+
+                local kbObj = gui:FindFirstChild("Keyboard", true)
+                if kbObj and kbObj:IsA("GuiObject") and kbObj.Visible then
+                    return true
+                end
+
+                for _, v in ipairs(gui:GetDescendants()) do
+                    if (v:IsA("TextButton") or v:IsA("TextLabel")) and v.Visible then
+                        local txt = v.Text
+                        if txt == "Enter" or (typeof(txt) == "string" and txt:find("cadangan huruf")) then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end)
+    return success and result or false
+end
+
+local function CheckCurrentlyMyTurn()
+
+    if IsCameraFocusingOnMe() then
+        return true
+    end
+
+    if IsGameKeyboardVisible() then
+        return true
+    end
+
+    if cameraTurnActive then
+        return true
+    end
+
+    return false
+end
+
+local function CariPrefixDiLocalPlayer()
+
+    local wordServer = PlayerGui:FindFirstChild("WordServer", true)
+    if wordServer and (wordServer:IsA("TextLabel") or wordServer:IsA("TextBox")) and wordServer.Visible and wordServer.Text ~= "" then
+        local p = EkstrakPrefix(wordServer.Text)
+        if p and p ~= "" then
+            return p, wordServer
+        end
+    end
+
     for _, gui in ipairs(PlayerGui:GetChildren()) do
-        if gui:IsA("ScreenGui") and gui ~= ScreenGui then
+        if gui:IsA("ScreenGui") and gui ~= ScreenGui and gui.Enabled then
             for _, v in ipairs(gui:GetDescendants()) do
                 if v:IsA("TextLabel") and v.Visible and v.Text ~= "" then
                     local text = v.Text
-                    if text:find("Hurufnya") or text:find("hurufnya") or text:find("Huruf") or text:find("Soal") or v.Name == "WordServer" then
+                    if text:find("Hurufnya") or text:find("hurufnya") or text:find("Huruf:") then
                         local p = EkstrakPrefix(text)
-                        if p then
+                        if p and p ~= "" then
                             return p, v
                         end
-                    end
-                end
-            end
-        end
-    end
 
-    -- 2. Cari di BillboardGui / SurfaceGui pada Character LocalPlayer (di atas kepala atau badan)
-    local char = LocalPlayer.Character
-    if char then
-        for _, v in ipairs(char:GetDescendants()) do
-            if v:IsA("BillboardGui") or v:IsA("SurfaceGui") then
-                for _, lbl in ipairs(v:GetDescendants()) do
-                    if (lbl:IsA("TextLabel") or lbl:IsA("TextButton")) and lbl.Text ~= "" then
-                        local p = EkstrakPrefix(lbl.Text)
-                        if p then
-                            return p, lbl
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- 3. Cari di Workspace (meja bermain aktif)
-    for _, obj in ipairs(workspace:GetChildren()) do
-        if obj:IsA("Model") or obj:IsA("Folder") then
-            local nameLower = obj.Name:lower()
-            if nameLower:find("table") or nameLower:find("meja") or nameLower:find("match") or nameLower:find("game") then
-                for _, v in ipairs(obj:GetDescendants()) do
-                    if v:IsA("TextLabel") and v.Text ~= "" and (v.Text:find("Hurufnya") or v.Name == "WordServer") then
-                        local p = EkstrakPrefix(v.Text)
-                        if p then
-                            return p, v
+                        local parent = v.Parent
+                        if parent then
+                            for _, sib in ipairs(parent:GetChildren()) do
+                                if sib ~= v and (sib:IsA("TextLabel") or sib:IsA("TextBox")) and sib.Visible and sib.Text ~= "" then
+                                    local sibPfx = EkstrakPrefix(sib.Text)
+                                    if sibPfx and sibPfx ~= "" then
+                                        return sibPfx, sib
+                                    end
+                                end
+                            end
                         end
                     end
                 end
@@ -1134,16 +1096,38 @@ local function CariPrefixDiGame()
     return nil, nil
 end
 
--- =========================================================================
--- GAME EVENT LISTENERS
--- =========================================================================
+if TurnCamera then
+    TurnCamera.OnClientEvent:Connect(function(targetPlayer)
+        if targetPlayer and (targetPlayer == LocalPlayer or targetPlayer.Name == LocalPlayer.Name or (typeof(targetPlayer) == "Instance" and targetPlayer:IsA("Model") and targetPlayer == LocalPlayer.Character)) then
 
--- 1. In-game Remote Event: UpdateWordIndex (Dictionary update & word history)
+            cameraTurnActive = true
+            isMyTurn = true
+            UpdateTurnDisplay(true, currentAwalan)
+
+            task.spawn(function()
+                task.wait(0.6)
+                if isMyTurn and deteksiPrefixEnabled then
+                    local pfx = CariPrefixDiLocalPlayer()
+                    if pfx and pfx ~= "" then
+                        ApplyDetectedPrefix(pfx)
+                    end
+                end
+            end)
+        else
+
+            cameraTurnActive = false
+            isMyTurn = false
+            UpdateTurnDisplay(false, nil)
+            BannerText.Text = "⏳ Menunggu giliran kamu..."
+            BannerText.TextColor3 = Palette.TextSecondary
+        end
+    end)
+end
+
 if UpdateWordIndex then
     UpdateWordIndex.OnClientEvent:Connect(function(data)
         if typeof(data) ~= "table" then return end
 
-        -- Sync database words if sent
         if typeof(data.AllWords) == "table" then
             task.spawn(function()
                 local frameStart = os.clock()
@@ -1158,64 +1142,16 @@ if UpdateWordIndex then
                         end
                     end
                 end
-                if count > 0 then
-                    UpdateWordList()
-                end
             end)
             return
         end
 
-        -- Word update on game board
-        if typeof(data.NewWord) == "string" and #data.NewWord > 0 then
+        if typeof(data.NewWord) == "string" and #data.NewWord >= 2 then
             TambahKataKeKamus(data.NewWord:lower())
-
-            if deteksiPrefixEnabled then
-                local nextPrefix
-                if #data.NewWord <= 3 then
-                    nextPrefix = data.NewWord
-                else
-                    nextPrefix = AmbilSukuKataTerakhir(data.NewWord)
-                end
-                ApplyDetectedPrefix(nextPrefix)
-            end
         end
     end)
 end
 
--- 2. In-game Remote Event: MatchUI (Live turn detection)
-if MatchRemote then
-    MatchRemote.OnClientEvent:Connect(function(action, value)
-        if action == "StartTurn" then
-            UpdateTurnDisplay(true, currentAwalan)
-
-            -- Cek value langsung jika dikirim remote
-            if typeof(value) == "string" and #value > 0 then
-                local p = EkstrakPrefix(value)
-                if p then
-                    ApplyDetectedPrefix(p)
-                end
-            end
-
-            -- Coba scan GUI dengan retry (0.1s, 0.2s, 0.3s, 0.5s)
-            task.spawn(function()
-                for _, delayTime in ipairs({0.1, 0.2, 0.3, 0.5}) do
-                    task.wait(delayTime)
-                    if deteksiPrefixEnabled then
-                        local pfx = CariPrefixDiGame()
-                        if pfx and pfx ~= "" then
-                            ApplyDetectedPrefix(pfx)
-                            break
-                        end
-                    end
-                end
-            end)
-        elseif action == "EndTurn" or action == "GameEnd" then
-            UpdateTurnDisplay(false, currentAwalan)
-        end
-    end)
-end
-
--- 3. Request in-game official dictionary
 task.spawn(function()
     if RequestWordIndex then
         pcall(function()
@@ -1224,7 +1160,6 @@ task.spawn(function()
     end
 end)
 
--- 4. Background Non-Blocking Dictionary Loader from GitHub (Zero-Lag Engine)
 task.spawn(function()
     local url = "https://raw.githubusercontent.com/thantzy/comission-script/refs/heads/main/samkat-kamus-2026-09-08.txt"
     BannerText.Text = "⏳ Mengunduh 212k kata..."
@@ -1236,13 +1171,12 @@ task.spawn(function()
     end
 
     BannerText.Text = "⚡ Memproses kamus..."
-    -- Safe newline character parsing (100% immune to Windows/Unix line ending quirks)
     local newlineChar = string.char(10)
     local returnChar = string.char(13)
     local lines = string.split(rawData, newlineChar)
     local totalLines = #lines
     local frameStart = os.clock()
-    local budget = 0.007 -- 7ms budget per frame (Smooth 60 FPS, fast 1-second load)
+    local budget = 0.007
 
     for i = 1, totalLines do
         local line = lines[i]
@@ -1254,12 +1188,11 @@ task.spawn(function()
             TambahKataKeKamus(line)
         end
 
-        -- Smooth yielding with live progress updates
         if i % 1500 == 0 and (os.clock() - frameStart) > budget then
             if i % 30000 == 0 then
                 local pct = math.floor((i / totalLines) * 100)
                 BannerText.Text = string.format("⚡ Memuat: %d%% (%dk kata)...", pct, math.floor(#KamusData / 1000))
-                UpdateWordList() -- Incremental updates so user sees words even while loading
+                UpdateWordList()
             end
             task.wait()
             frameStart = os.clock()
@@ -1272,35 +1205,64 @@ task.spawn(function()
     UpdateWordList()
 end)
 
--- 5. Fallback GUI Scanner with Instance Caching (Detects 1 letter 'T', 2 letters 'PI', etc)
 task.spawn(function()
-    local cachedLabel = nil
-    while task.wait(0.5) do
-        if deteksiPrefixEnabled then
-            pcall(function()
-                if cachedLabel and cachedLabel.Parent and cachedLabel.Text ~= "" then
-                    local pfx = EkstrakPrefix(cachedLabel.Text)
-                    if pfx and pfx ~= "" and pfx ~= currentAwalan:lower() then
-                        ApplyDetectedPrefix(pfx)
-                    end
-                else
-                    local pfx, foundLabel = CariPrefixDiGame()
-                    if pfx and pfx ~= "" then
-                        if foundLabel then
-                            cachedLabel = foundLabel
-                        end
-                        if pfx ~= currentAwalan:lower() then
+
+    local initialTurn = CheckCurrentlyMyTurn()
+    if initialTurn then
+        isMyTurn = true
+        UpdateTurnDisplay(true, currentAwalan)
+        local pfx = CariPrefixDiLocalPlayer()
+        if pfx and pfx ~= "" then
+            ApplyDetectedPrefix(pfx)
+        end
+    else
+        isMyTurn = false
+        UpdateTurnDisplay(false, nil)
+        BannerText.Text = "⏳ Menunggu giliran kamu..."
+        BannerText.TextColor3 = Palette.TextSecondary
+    end
+
+    local wasMyTurn = isMyTurn
+
+    while task.wait(0.25) do
+        local activeTurn = CheckCurrentlyMyTurn()
+
+        if wasMyTurn and not activeTurn then
+            isMyTurn = false
+            cameraTurnActive = false
+            UpdateTurnDisplay(false, nil)
+            BannerText.Text = "⏳ Menunggu giliran kamu..."
+            BannerText.TextColor3 = Palette.TextSecondary
+        end
+
+        if not wasMyTurn and activeTurn then
+            isMyTurn = true
+            UpdateTurnDisplay(true, currentAwalan)
+            if deteksiPrefixEnabled then
+                task.spawn(function()
+                    task.wait(0.5)
+                    if isMyTurn then
+                        local pfx = CariPrefixDiLocalPlayer()
+                        if pfx and pfx ~= "" then
                             ApplyDetectedPrefix(pfx)
                         end
                     end
+                end)
+            end
+        end
+
+        wasMyTurn = activeTurn
+
+        if isMyTurn and activeTurn and deteksiPrefixEnabled then
+            pcall(function()
+                local pfx = CariPrefixDiLocalPlayer()
+                if pfx and pfx ~= "" and pfx ~= currentAwalan:lower() then
+                    ApplyDetectedPrefix(pfx)
                 end
             end)
         end
     end
 end)
 
--- Initial presentation
-UpdateTurnDisplay(true, "T")
 UpdateWordList()
-
-print("ThanHub Sambung Kata Solver (Compact Zero-Lag Edition) loaded successfully!")
+print("ThanHub Sambung Kata Solver (Camera-Driven Isolated Turn) loaded successfully!")

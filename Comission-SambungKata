@@ -1,0 +1,973 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Camera = workspace.CurrentCamera
+
+-- Clean up any previous instances
+if game:GetService("CoreGui"):FindFirstChild("ThanHub_KataSolver_UI") then
+    game:GetService("CoreGui").ThanHub_KataSolver_UI:Destroy()
+end
+if PlayerGui:FindFirstChild("ThanHub_KataSolver_UI") then
+    PlayerGui.ThanHub_KataSolver_UI:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ThanHub_KataSolver_UI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local pcallGui = pcall(function()
+    ScreenGui.Parent = game:GetService("CoreGui")
+end)
+if not pcallGui or not ScreenGui.Parent then
+    ScreenGui.Parent = PlayerGui
+end
+
+-- Remotes
+local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10) or ReplicatedStorage:FindFirstChild("Remotes")
+local UpdateWordIndex = RemotesFolder and (RemotesFolder:WaitForChild("UpdateWordIndex", 5) or RemotesFolder:FindFirstChild("UpdateWordIndex"))
+local RequestWordIndex = RemotesFolder and (RemotesFolder:WaitForChild("RequestWordIndex", 5) or RemotesFolder:FindFirstChild("RequestWordIndex"))
+local MatchRemote = RemotesFolder and (RemotesFolder:WaitForChild("MatchUI", 5) or RemotesFolder:FindFirstChild("MatchUI"))
+
+-- State
+local currentAwalan = "t"
+local currentAkhiran = ""
+local deteksiPrefixEnabled = true
+local isMyTurn = true
+local KamusData = {}
+local KamusSet = {}
+
+-- Database kamus dimuat langsung dari repository external
+
+-- Pemenggalan suku kata terakhir bahasa Indonesia (KBBI)
+local function AmbilSukuKataTerakhir(kata)
+    if not kata or type(kata) ~= "string" then return "" end
+    kata = kata:gsub("%s+", ""):lower()
+    if #kata <= 2 then return kata end
+
+    local vowels = {a = true, e = true, i = true, o = true, u = true}
+    local vIndices = {}
+
+    for i = 1, #kata do
+        local c = kata:sub(i, i)
+        if vowels[c] then
+            table.insert(vIndices, i)
+        end
+    end
+
+    if #vIndices == 0 or #vIndices == 1 then
+        return kata
+    end
+
+    local lastV = vIndices[#vIndices]
+    local prevV = vIndices[#vIndices - 1]
+
+    -- Diftong ai, au, oi, ei di akhir kata (pan-tai, da-nau, am-boi)
+    local isDiphthong = (lastV == prevV + 1) and (lastV == #kata) and (kata:sub(prevV, lastV) == "ai" or kata:sub(prevV, lastV) == "au" or kata:sub(prevV, lastV) == "oi" or kata:sub(prevV, lastV) == "ei")
+
+    local targetV = lastV
+    local beforeV = prevV
+
+    if isDiphthong then
+        targetV = prevV
+        if #vIndices >= 3 then
+            beforeV = vIndices[#vIndices - 2]
+        else
+            beforeV = nil
+        end
+    end
+
+    if not beforeV then
+        local between = kata:sub(1, targetV - 1)
+        if #between <= 1 then
+            return kata
+        else
+            return kata:sub(#between)
+        end
+    end
+
+    local between = kata:sub(beforeV + 1, targetV - 1)
+    local startPos
+
+    if between == "ng" or between == "ny" or between == "sy" or between == "kh" then
+        startPos = beforeV + 1
+    elseif #between >= 3 and (between:sub(1, 2) == "ng" or between:sub(1, 2) == "ny" or between:sub(1, 2) == "sy" or between:sub(1, 2) == "kh") then
+        startPos = beforeV + 1 + 2
+    elseif #between == 0 then
+        startPos = targetV
+    elseif #between == 1 then
+        startPos = beforeV + 1
+    else
+        startPos = beforeV + 2
+    end
+
+    return kata:sub(startPos)
+end
+
+-- Premium Obsidian & Emerald Color Palette
+local Palette = {
+    ObsidianBase   = Color3.fromRGB(13, 15, 22),
+    CardDark       = Color3.fromRGB(20, 23, 34),
+    CardDarkHover  = Color3.fromRGB(27, 31, 46),
+    StrokeSubtle   = Color3.fromRGB(36, 42, 60),
+    StrokeAccent   = Color3.fromRGB(0, 230, 160),
+    EmeraldAccent  = Color3.fromRGB(0, 230, 160),
+    EmeraldGlowBg  = Color3.fromRGB(15, 42, 34),
+    VioletAccent   = Color3.fromRGB(120, 95, 255),
+    VioletBg       = Color3.fromRGB(28, 24, 52),
+    TextPrimary    = Color3.fromRGB(242, 245, 255),
+    TextSecondary  = Color3.fromRGB(130, 138, 162),
+    TextMuted      = Color3.fromRGB(85, 92, 114),
+    BadgeCycle     = {
+        Color3.fromRGB(0, 230, 160),   -- Emerald
+        Color3.fromRGB(255, 165, 38),  -- Amber Orange
+        Color3.fromRGB(255, 75, 140),  -- Electric Pink
+        Color3.fromRGB(0, 195, 255),   -- Sky Cyan
+        Color3.fromRGB(160, 90, 255),  -- Royal Violet
+        Color3.fromRGB(60, 230, 120)   -- Lime Green
+    }
+}
+
+-- Responsive viewport calculation
+local function GetResponsiveSizes()
+    local vp = Camera and Camera.ViewportSize or Vector2.new(1280, 720)
+    local w = math.clamp(vp.X - 28, 270, 310)
+    local h = math.clamp(vp.Y - 80, 350, 420)
+    return w, h
+end
+
+local baseW, baseH = GetResponsiveSizes()
+
+-- =========================================================================
+-- FLOATING TOGGLE BUTTON (FAB for Mobile & PC)
+-- =========================================================================
+local FloatingButton = Instance.new("Frame")
+FloatingButton.Name = "FloatingToggle"
+FloatingButton.Size = UDim2.new(0, 110, 0, 34)
+FloatingButton.Position = UDim2.new(0, 16, 0, 60)
+FloatingButton.BackgroundColor3 = Palette.ObsidianBase
+FloatingButton.BorderSizePixel = 0
+FloatingButton.Parent = ScreenGui
+
+local FloatCorner = Instance.new("UICorner")
+FloatCorner.CornerRadius = UDim.new(1, 0)
+FloatCorner.Parent = FloatingButton
+
+local FloatStroke = Instance.new("UIStroke")
+FloatStroke.Color = Palette.StrokeAccent
+FloatStroke.Thickness = 1.2
+FloatStroke.Parent = FloatingButton
+
+local FloatTrigger = Instance.new("TextButton")
+FloatTrigger.Size = UDim2.new(1, 0, 1, 0)
+FloatTrigger.BackgroundTransparency = 1
+FloatTrigger.Text = ""
+FloatTrigger.Parent = FloatingButton
+
+local FloatDot = Instance.new("Frame")
+FloatDot.Size = UDim2.new(0, 8, 0, 8)
+FloatDot.Position = UDim2.new(0, 10, 0.5, -4)
+FloatDot.BackgroundColor3 = Palette.EmeraldAccent
+FloatDot.BorderSizePixel = 0
+FloatDot.Parent = FloatingButton
+
+local FloatDotCorner = Instance.new("UICorner")
+FloatDotCorner.CornerRadius = UDim.new(1, 0)
+FloatDotCorner.Parent = FloatDot
+
+local FloatText = Instance.new("TextLabel")
+FloatText.Size = UDim2.new(1, -26, 1, 0)
+FloatText.Position = UDim2.new(0, 22, 0, 0)
+FloatText.BackgroundTransparency = 1
+FloatText.Font = Enum.Font.GothamBold
+FloatText.Text = "THANHUB"
+FloatText.TextSize = 11
+FloatText.TextColor3 = Palette.TextPrimary
+FloatText.TextXAlignment = Enum.TextXAlignment.Left
+FloatText.Parent = FloatingButton
+
+-- Make Floating Button Draggable
+local fDragging = false
+local fDragInput, fDragStart, fStartPos
+
+FloatingButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        fDragging = true
+        fDragStart = input.Position
+        fStartPos = FloatingButton.Position
+
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                fDragging = false
+            end
+        end)
+    end
+end)
+
+FloatingButton.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        fDragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == fDragInput and fDragging then
+        local delta = input.Position - fDragStart
+        FloatingButton.Position = UDim2.new(fStartPos.X.Scale, fStartPos.X.Offset + delta.X, fStartPos.Y.Scale, fStartPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- =========================================================================
+-- MAIN WINDOW FRAME
+-- =========================================================================
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, baseW, 0, baseH)
+MainFrame.Position = UDim2.new(0.5, -baseW / 2, 0.5, -baseH / 2)
+MainFrame.BackgroundColor3 = Palette.ObsidianBase
+MainFrame.BorderSizePixel = 0
+MainFrame.ClipsDescendants = true
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 14)
+MainCorner.Parent = MainFrame
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Palette.StrokeSubtle
+MainStroke.Thickness = 1.2
+MainStroke.Parent = MainFrame
+
+local MainGradient = Instance.new("UIGradient")
+MainGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 22, 34)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(12, 14, 20))
+})
+MainGradient.Rotation = 45
+MainGradient.Parent = MainFrame
+
+-- Draggable Main Window
+local mDragging = false
+local mDragInput, mDragStart, mStartPos
+
+MainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        mDragging = true
+        mDragStart = input.Position
+        mStartPos = MainFrame.Position
+
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                mDragging = false
+            end
+        end)
+    end
+end)
+
+MainFrame.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        mDragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == mDragInput and mDragging then
+        local delta = input.Position - mDragStart
+        MainFrame.Position = UDim2.new(mStartPos.X.Scale, mStartPos.X.Offset + delta.X, mStartPos.Y.Scale, mStartPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- Responsive Viewport Listener (phone rotation / window resize)
+if Camera then
+    Camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+        local nw, nh = GetResponsiveSizes()
+        MainFrame.Size = UDim2.new(0, nw, 0, nh)
+    end)
+end
+
+-- =========================================================================
+-- HEADER SECTION
+-- =========================================================================
+local Header = Instance.new("Frame")
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0, 48)
+Header.BackgroundTransparency = 1
+Header.Parent = MainFrame
+
+-- Diamond / Brand Badge
+local BrandBadge = Instance.new("Frame")
+BrandBadge.Size = UDim2.new(0, 28, 0, 28)
+BrandBadge.Position = UDim2.new(0, 12, 0.5, -14)
+BrandBadge.BackgroundColor3 = Palette.VioletBg
+BrandBadge.BorderSizePixel = 0
+BrandBadge.Parent = Header
+
+local BrandCorner = Instance.new("UICorner")
+BrandCorner.CornerRadius = UDim.new(0, 8)
+BrandCorner.Parent = BrandBadge
+
+local BrandStroke = Instance.new("UIStroke")
+BrandStroke.Color = Palette.VioletAccent
+BrandStroke.Thickness = 1
+BrandStroke.Parent = BrandBadge
+
+local BrandIcon = Instance.new("TextLabel")
+BrandIcon.Size = UDim2.new(1, 0, 1, 0)
+BrandIcon.BackgroundTransparency = 1
+BrandIcon.Font = Enum.Font.GothamBold
+BrandIcon.Text = "⚡"
+BrandIcon.TextSize = 13
+BrandIcon.TextColor3 = Palette.VioletAccent
+BrandIcon.Parent = BrandBadge
+
+-- Header Title & Subtitle
+local TitleContainer = Instance.new("Frame")
+TitleContainer.Size = UDim2.new(1, -126, 1, 0)
+TitleContainer.Position = UDim2.new(0, 46, 0, 0)
+TitleContainer.BackgroundTransparency = 1
+TitleContainer.Parent = Header
+
+local TitleMain = Instance.new("TextLabel")
+TitleMain.Name = "TitleMain"
+TitleMain.Size = UDim2.new(1, 0, 0, 20)
+TitleMain.Position = UDim2.new(0, 0, 0, 8)
+TitleMain.BackgroundTransparency = 1
+TitleMain.Font = Enum.Font.GothamBold
+TitleMain.Text = "THANHUB SOLVER"
+TitleMain.TextSize = 12
+TitleMain.TextColor3 = Palette.TextPrimary
+TitleMain.TextXAlignment = Enum.TextXAlignment.Left
+TitleMain.Parent = TitleContainer
+
+local SubtitleTurn = Instance.new("TextLabel")
+SubtitleTurn.Name = "SubtitleTurn"
+SubtitleTurn.Size = UDim2.new(1, 0, 0, 16)
+SubtitleTurn.Position = UDim2.new(0, 0, 0, 26)
+SubtitleTurn.BackgroundTransparency = 1
+SubtitleTurn.Font = Enum.Font.GothamMedium
+SubtitleTurn.Text = "● Giliran kamu! [ T ]"
+SubtitleTurn.TextSize = 10
+SubtitleTurn.TextColor3 = Palette.EmeraldAccent
+SubtitleTurn.TextXAlignment = Enum.TextXAlignment.Left
+SubtitleTurn.Parent = TitleContainer
+
+-- Header Buttons (- and X)
+local HeaderControls = Instance.new("Frame")
+HeaderControls.Size = UDim2.new(0, 60, 1, 0)
+HeaderControls.Position = UDim2.new(1, -66, 0, 0)
+HeaderControls.BackgroundTransparency = 1
+HeaderControls.Parent = Header
+
+local BtnMin = Instance.new("TextButton")
+BtnMin.Size = UDim2.new(0, 26, 0, 26)
+BtnMin.Position = UDim2.new(0, 0, 0.5, -13)
+BtnMin.BackgroundColor3 = Palette.CardDark
+BtnMin.BorderSizePixel = 0
+BtnMin.Font = Enum.Font.GothamBold
+BtnMin.Text = "—"
+BtnMin.TextSize = 12
+BtnMin.TextColor3 = Palette.TextSecondary
+BtnMin.Parent = HeaderControls
+
+local BtnMinCorner = Instance.new("UICorner")
+BtnMinCorner.CornerRadius = UDim.new(0, 6)
+BtnMinCorner.Parent = BtnMin
+
+local BtnClose = Instance.new("TextButton")
+BtnClose.Size = UDim2.new(0, 26, 0, 26)
+BtnClose.Position = UDim2.new(1, -26, 0.5, -13)
+BtnClose.BackgroundColor3 = Palette.CardDark
+BtnClose.BorderSizePixel = 0
+BtnClose.Font = Enum.Font.GothamBold
+BtnClose.Text = "✕"
+BtnClose.TextSize = 11
+BtnClose.TextColor3 = Palette.TextSecondary
+BtnClose.Parent = HeaderControls
+
+local BtnCloseCorner = Instance.new("UICorner")
+BtnCloseCorner.CornerRadius = UDim.new(0, 6)
+BtnCloseCorner.Parent = BtnClose
+
+-- Divider
+local HeaderLine = Instance.new("Frame")
+HeaderLine.Size = UDim2.new(1, 0, 0, 1)
+HeaderLine.Position = UDim2.new(0, 0, 0, 48)
+HeaderLine.BackgroundColor3 = Palette.StrokeSubtle
+HeaderLine.BorderSizePixel = 0
+HeaderLine.Parent = MainFrame
+
+-- Content Container
+local ContentBody = Instance.new("Frame")
+ContentBody.Name = "ContentBody"
+ContentBody.Size = UDim2.new(1, 0, 1, -49)
+ContentBody.Position = UDim2.new(0, 0, 0, 49)
+ContentBody.BackgroundTransparency = 1
+ContentBody.Parent = MainFrame
+
+-- Minimize & Floating Toggle Actions
+local isMinimized = false
+BtnMin.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    local nw, nh = GetResponsiveSizes()
+    if isMinimized then
+        MainFrame:TweenSize(UDim2.new(0, nw, 0, 48), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
+        BtnMin.Text = "+"
+    else
+        MainFrame:TweenSize(UDim2.new(0, nw, 0, nh), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
+        BtnMin.Text = "—"
+    end
+end)
+
+local function ToggleMainWindow()
+    MainFrame.Visible = not MainFrame.Visible
+    if MainFrame.Visible then
+        FloatDot.BackgroundColor3 = Palette.EmeraldAccent
+    else
+        FloatDot.BackgroundColor3 = Palette.TextMuted
+    end
+end
+
+BtnClose.MouseButton1Click:Connect(ToggleMainWindow)
+FloatTrigger.MouseButton1Click:Connect(ToggleMainWindow)
+
+-- =========================================================================
+-- SEARCH CONTROLS (AWALAN & AKHIRAN)
+-- =========================================================================
+local SearchPanel = Instance.new("Frame")
+SearchPanel.Name = "SearchPanel"
+SearchPanel.Size = UDim2.new(1, -20, 0, 60)
+SearchPanel.Position = UDim2.new(0, 10, 0, 8)
+SearchPanel.BackgroundTransparency = 1
+SearchPanel.Parent = ContentBody
+
+-- AWALAN CARD (Left 48%)
+local AwalanCard = Instance.new("Frame")
+AwalanCard.Size = UDim2.new(0.48, 0, 1, 0)
+AwalanCard.Position = UDim2.new(0, 0, 0, 0)
+AwalanCard.BackgroundColor3 = Palette.CardDark
+AwalanCard.BorderSizePixel = 0
+AwalanCard.Parent = SearchPanel
+
+local AwalanCorner = Instance.new("UICorner")
+AwalanCorner.CornerRadius = UDim.new(0, 8)
+AwalanCorner.Parent = AwalanCard
+
+local AwalanStroke = Instance.new("UIStroke")
+AwalanStroke.Color = Palette.EmeraldAccent
+AwalanStroke.Thickness = 1
+AwalanStroke.Parent = AwalanCard
+
+local AwalanTag = Instance.new("TextLabel")
+AwalanTag.Size = UDim2.new(1, -12, 0, 14)
+AwalanTag.Position = UDim2.new(0, 8, 0, 6)
+AwalanTag.BackgroundTransparency = 1
+AwalanTag.Font = Enum.Font.GothamBold
+AwalanTag.Text = "AWALAN"
+AwalanTag.TextSize = 9
+AwalanTag.TextColor3 = Palette.EmeraldAccent
+AwalanTag.TextXAlignment = Enum.TextXAlignment.Left
+AwalanTag.Parent = AwalanCard
+
+local InputAwalan = Instance.new("TextBox")
+InputAwalan.Name = "InputAwalan"
+InputAwalan.Size = UDim2.new(1, -16, 0, 32)
+InputAwalan.Position = UDim2.new(0, 8, 0, 22)
+InputAwalan.BackgroundTransparency = 1
+InputAwalan.Font = Enum.Font.GothamBold
+InputAwalan.Text = "t"
+InputAwalan.PlaceholderText = "..."
+InputAwalan.TextSize = 15
+InputAwalan.TextColor3 = Palette.EmeraldAccent
+InputAwalan.ClearTextOnFocus = false
+InputAwalan.TextXAlignment = Enum.TextXAlignment.Left
+InputAwalan.Parent = AwalanCard
+
+-- AKHIRAN CARD (Right 48%)
+local AkhiranCard = Instance.new("Frame")
+AkhiranCard.Size = UDim2.new(0.48, 0, 1, 0)
+AkhiranCard.Position = UDim2.new(0.52, 0, 0, 0)
+AkhiranCard.BackgroundColor3 = Palette.CardDark
+AkhiranCard.BorderSizePixel = 0
+AkhiranCard.Parent = SearchPanel
+
+local AkhiranCorner = Instance.new("UICorner")
+AkhiranCorner.CornerRadius = UDim.new(0, 8)
+AkhiranCorner.Parent = AkhiranCard
+
+local AkhiranStroke = Instance.new("UIStroke")
+AkhiranStroke.Color = Palette.StrokeSubtle
+AkhiranStroke.Thickness = 1
+AkhiranStroke.Parent = AkhiranCard
+
+local AkhiranTag = Instance.new("TextLabel")
+AkhiranTag.Size = UDim2.new(1, -12, 0, 14)
+AkhiranTag.Position = UDim2.new(0, 8, 0, 6)
+AkhiranTag.BackgroundTransparency = 1
+AkhiranTag.Font = Enum.Font.GothamBold
+AkhiranTag.Text = "AKHIRAN"
+AkhiranTag.TextSize = 9
+AkhiranTag.TextColor3 = Palette.TextSecondary
+AkhiranTag.TextXAlignment = Enum.TextXAlignment.Left
+AkhiranTag.Parent = AkhiranCard
+
+local InputAkhiran = Instance.new("TextBox")
+InputAkhiran.Name = "InputAkhiran"
+InputAkhiran.Size = UDim2.new(1, -16, 0, 32)
+InputAkhiran.Position = UDim2.new(0, 8, 0, 22)
+InputAkhiran.BackgroundTransparency = 1
+InputAkhiran.Font = Enum.Font.GothamBold
+InputAkhiran.Text = ""
+InputAkhiran.PlaceholderText = "Ketik akhiran..."
+InputAkhiran.PlaceholderColor3 = Palette.TextMuted
+InputAkhiran.TextSize = 12
+InputAkhiran.TextColor3 = Palette.TextPrimary
+InputAkhiran.ClearTextOnFocus = false
+InputAkhiran.TextXAlignment = Enum.TextXAlignment.Left
+InputAkhiran.Parent = AkhiranCard
+
+-- =========================================================================
+-- TOOLBAR (AUTO-DETECT SWITCH & CLEAR BUTTON)
+-- =========================================================================
+local Toolbar = Instance.new("Frame")
+Toolbar.Name = "Toolbar"
+Toolbar.Size = UDim2.new(1, -20, 0, 32)
+Toolbar.Position = UDim2.new(0, 10, 0, 74)
+Toolbar.BackgroundTransparency = 1
+Toolbar.Parent = ContentBody
+
+-- Auto-Detect Prefix Chip
+local ChipDetect = Instance.new("TextButton")
+ChipDetect.Size = UDim2.new(0, 140, 1, 0)
+ChipDetect.Position = UDim2.new(0, 0, 0, 0)
+ChipDetect.BackgroundColor3 = Palette.EmeraldGlowBg
+ChipDetect.BorderSizePixel = 0
+ChipDetect.Text = ""
+ChipDetect.AutoButtonColor = false
+ChipDetect.Parent = Toolbar
+
+local ChipCorner = Instance.new("UICorner")
+ChipCorner.CornerRadius = UDim.new(0, 6)
+ChipCorner.Parent = ChipDetect
+
+local ChipStroke = Instance.new("UIStroke")
+ChipStroke.Color = Palette.StrokeAccent
+ChipStroke.Thickness = 1
+ChipStroke.Parent = ChipDetect
+
+local ChipDot = Instance.new("Frame")
+ChipDot.Size = UDim2.new(0, 6, 0, 6)
+ChipDot.Position = UDim2.new(0, 8, 0.5, -3)
+ChipDot.BackgroundColor3 = Palette.EmeraldAccent
+ChipDot.BorderSizePixel = 0
+ChipDot.Parent = ChipDetect
+
+local ChipDotCorner = Instance.new("UICorner")
+ChipDotCorner.CornerRadius = UDim.new(1, 0)
+ChipDotCorner.Parent = ChipDot
+
+local ChipLabel = Instance.new("TextLabel")
+ChipLabel.Size = UDim2.new(1, -22, 1, 0)
+ChipLabel.Position = UDim2.new(0, 18, 0, 0)
+ChipLabel.BackgroundTransparency = 1
+ChipLabel.Font = Enum.Font.GothamBold
+ChipLabel.Text = "Auto-Detect: ON"
+ChipLabel.TextSize = 10
+ChipLabel.TextColor3 = Palette.EmeraldAccent
+ChipLabel.TextXAlignment = Enum.TextXAlignment.Left
+ChipLabel.Parent = ChipDetect
+
+-- Clear Filters Button
+local BtnClear = Instance.new("TextButton")
+BtnClear.Size = UDim2.new(0, 64, 1, 0)
+BtnClear.Position = UDim2.new(1, -64, 0, 0)
+BtnClear.BackgroundColor3 = Palette.CardDark
+BtnClear.BorderSizePixel = 0
+BtnClear.Font = Enum.Font.GothamBold
+BtnClear.Text = "↺ Reset"
+BtnClear.TextSize = 10
+BtnClear.TextColor3 = Palette.TextSecondary
+BtnClear.Parent = Toolbar
+
+local BtnClearCorner = Instance.new("UICorner")
+BtnClearCorner.CornerRadius = UDim.new(0, 6)
+BtnClearCorner.Parent = BtnClear
+
+local BtnClearStroke = Instance.new("UIStroke")
+BtnClearStroke.Color = Palette.StrokeSubtle
+BtnClearStroke.Thickness = 1
+BtnClearStroke.Parent = BtnClear
+
+local function SetDetectState(enabled)
+    deteksiPrefixEnabled = enabled
+    if enabled then
+        ChipLabel.Text = "Auto-Detect: ON"
+        ChipLabel.TextColor3 = Palette.EmeraldAccent
+        ChipDot.BackgroundColor3 = Palette.EmeraldAccent
+        ChipStroke.Color = Palette.StrokeAccent
+        ChipDetect.BackgroundColor3 = Palette.EmeraldGlowBg
+    else
+        ChipLabel.Text = "Auto-Detect: OFF"
+        ChipLabel.TextColor3 = Palette.TextMuted
+        ChipDot.BackgroundColor3 = Palette.TextMuted
+        ChipStroke.Color = Palette.StrokeSubtle
+        ChipDetect.BackgroundColor3 = Palette.CardDark
+    end
+end
+
+ChipDetect.MouseButton1Click:Connect(function()
+    SetDetectState(not deteksiPrefixEnabled)
+end)
+
+BtnClear.MouseButton1Click:Connect(function()
+    InputAkhiran.Text = ""
+    currentAkhiran = ""
+end)
+
+-- =========================================================================
+-- STATUS PILL & COUNT BANNER
+-- =========================================================================
+local StatusBanner = Instance.new("Frame")
+StatusBanner.Name = "StatusBanner"
+StatusBanner.Size = UDim2.new(1, -20, 0, 22)
+StatusBanner.Position = UDim2.new(0, 10, 0, 112)
+StatusBanner.BackgroundTransparency = 1
+StatusBanner.Parent = ContentBody
+
+local BannerText = Instance.new("TextLabel")
+BannerText.Size = UDim2.new(1, 0, 1, 0)
+BannerText.BackgroundTransparency = 1
+BannerText.Font = Enum.Font.GothamMedium
+BannerText.Text = "🔎 [ T ] ➔ [ * ]  •  Memuat..."
+BannerText.TextSize = 10
+BannerText.TextColor3 = Palette.TextSecondary
+BannerText.TextXAlignment = Enum.TextXAlignment.Left
+BannerText.Parent = StatusBanner
+
+-- =========================================================================
+-- LIVE WORD LIST (SCROLLING FRAME)
+-- =========================================================================
+local ScrollingList = Instance.new("ScrollingFrame")
+ScrollingList.Name = "WordsList"
+ScrollingList.Size = UDim2.new(1, -20, 1, -142)
+ScrollingList.Position = UDim2.new(0, 10, 0, 138)
+ScrollingList.BackgroundTransparency = 1
+ScrollingList.BorderSizePixel = 0
+ScrollingList.ScrollBarThickness = 3
+ScrollingList.ScrollBarImageColor3 = Palette.VioletAccent
+ScrollingList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ScrollingList.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollingList.Parent = ContentBody
+
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ListLayout.Padding = UDim.new(0, 5)
+ListLayout.Parent = ScrollingList
+
+-- Render Engine
+local renderId = 0
+
+local function UpdateWordList()
+    renderId = renderId + 1
+    local currentId = renderId
+
+    for _, child in ipairs(ScrollingList:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
+
+    local awalan = currentAwalan:lower():gsub("%s+", "")
+    local akhiran = currentAkhiran:lower():gsub("%s+", "")
+
+    local awalanDisp = awalan ~= "" and awalan:upper() or "*"
+    local akhiranDisp = akhiran ~= "" and akhiran:upper() or "*"
+
+    if awalan == "" and akhiran == "" then
+        BannerText.Text = "💡 Ketik awalan atau akhiran untuk mencari kata."
+        return
+    end
+
+    local results = {}
+    local limit = 300
+    local isFallback = false
+
+    -- 1. Cari kata yang cocok dengan Awalan DAN Akhiran
+    for _, word in ipairs(KamusData) do
+        local mAwalan = (awalan == "") or (word:sub(1, #awalan) == awalan)
+        local mAkhiran = (akhiran == "") or (word:sub(-#akhiran) == akhiran)
+
+        if mAwalan and mAkhiran then
+            table.insert(results, word)
+            if #results >= limit then
+                break
+            end
+        end
+    end
+
+    -- 2. Jika akhiran dicari tapi tidak ada kata yang cocok, alihkan ke akhiran lain
+    if #results == 0 and akhiran ~= "" then
+        isFallback = true
+        for _, word in ipairs(KamusData) do
+            local mAwalan = (awalan == "") or (word:sub(1, #awalan) == awalan)
+            if mAwalan then
+                table.insert(results, word)
+                if #results >= limit then
+                    break
+                end
+            end
+        end
+    end
+
+    -- 3. Perbarui teks status banner
+    if isFallback then
+        BannerText.Text = string.format("⚠️ Akhiran [ %s ] tidak ada! Dialihkan ke kata lain (%d kata)", akhiranDisp, #results)
+        BannerText.TextColor3 = Color3.fromRGB(255, 185, 45) -- Kuning peringatan
+    elseif #results == 0 then
+        BannerText.Text = string.format("❌ Tidak ada kata ditemukan untuk [ %s ]", awalanDisp)
+        BannerText.TextColor3 = Color3.fromRGB(255, 95, 95) -- Merah
+    else
+        BannerText.Text = string.format("🔎 [ %s ] ➔ [ %s ]  •  %d kata ditemukan", awalanDisp, akhiranDisp, #results)
+        BannerText.TextColor3 = Palette.TextSecondary
+    end
+
+    for idx, word in ipairs(results) do
+        if currentId ~= renderId then break end
+
+        local Card = Instance.new("TextButton")
+        Card.Name = "Word_" .. idx
+        Card.Size = UDim2.new(1, -4, 0, 36)
+        Card.BackgroundColor3 = Palette.CardDark
+        Card.BorderSizePixel = 0
+        Card.Text = ""
+        Card.AutoButtonColor = false
+        Card.Parent = ScrollingList
+
+        local CardCorner = Instance.new("UICorner")
+        CardCorner.CornerRadius = UDim.new(0, 8)
+        CardCorner.Parent = Card
+
+        local CardStroke = Instance.new("UIStroke")
+        CardStroke.Color = Palette.StrokeSubtle
+        CardStroke.Thickness = 0.8
+        CardStroke.Parent = Card
+
+        -- Badge Left
+        local badgeColor = Palette.BadgeCycle[((idx - 1) % #Palette.BadgeCycle) + 1]
+        local Badge = Instance.new("Frame")
+        Badge.Size = UDim2.new(0, 22, 0, 22)
+        Badge.Position = UDim2.new(0, 7, 0.5, -11)
+        Badge.BackgroundColor3 = badgeColor
+        Badge.BorderSizePixel = 0
+        Badge.Parent = Card
+
+        local BadgeCorner = Instance.new("UICorner")
+        BadgeCorner.CornerRadius = UDim.new(0, 6)
+        BadgeCorner.Parent = Badge
+
+        local BadgeText = Instance.new("TextLabel")
+        BadgeText.Size = UDim2.new(1, 0, 1, 0)
+        BadgeText.BackgroundTransparency = 1
+        BadgeText.Font = Enum.Font.GothamBold
+        BadgeText.Text = word:sub(1, 1):upper()
+        BadgeText.TextSize = 12
+        BadgeText.TextColor3 = Color3.fromRGB(255, 255, 255)
+        BadgeText.Parent = Badge
+
+        -- Word Label
+        local WordLabel = Instance.new("TextLabel")
+        WordLabel.Size = UDim2.new(1, -86, 1, 0)
+        WordLabel.Position = UDim2.new(0, 36, 0, 0)
+        WordLabel.BackgroundTransparency = 1
+        WordLabel.Font = Enum.Font.GothamBold
+        WordLabel.Text = word:upper()
+        WordLabel.TextSize = 12
+        WordLabel.TextColor3 = Palette.TextPrimary
+        WordLabel.TextXAlignment = Enum.TextXAlignment.Left
+        WordLabel.Parent = Card
+
+        -- Copy Pill Indicator
+        local CopyTag = Instance.new("TextLabel")
+        CopyTag.Size = UDim2.new(0, 48, 0, 20)
+        CopyTag.Position = UDim2.new(1, -54, 0.5, -10)
+        CopyTag.BackgroundColor3 = Palette.ObsidianBase
+        CopyTag.Font = Enum.Font.GothamBold
+        CopyTag.Text = "SALIN"
+        CopyTag.TextSize = 9
+        CopyTag.TextColor3 = Palette.TextSecondary
+        CopyTag.Parent = Card
+
+        local CopyCorner = Instance.new("UICorner")
+        CopyCorner.CornerRadius = UDim.new(0, 5)
+        CopyCorner.Parent = CopyTag
+
+        -- Micro Animations on Hover
+        Card.MouseEnter:Connect(function()
+            TweenService:Create(Card, TweenInfo.new(0.12), {BackgroundColor3 = Palette.CardDarkHover}):Play()
+            TweenService:Create(CardStroke, TweenInfo.new(0.12), {Color = Palette.StrokeAccent}):Play()
+        end)
+        Card.MouseLeave:Connect(function()
+            TweenService:Create(Card, TweenInfo.new(0.12), {BackgroundColor3 = Palette.CardDark}):Play()
+            TweenService:Create(CardStroke, TweenInfo.new(0.12), {Color = Palette.StrokeSubtle}):Play()
+        end)
+
+        -- Tap to Copy Action
+        Card.MouseButton1Click:Connect(function()
+            pcall(function()
+                setclipboard(word)
+            end)
+            CopyTag.Text = "✓ OKE!"
+            CopyTag.TextColor3 = Palette.EmeraldAccent
+            CopyTag.BackgroundColor3 = Palette.EmeraldGlowBg
+            WordLabel.TextColor3 = Palette.EmeraldAccent
+
+            task.wait(0.65)
+            if CopyTag and WordLabel then
+                CopyTag.Text = "SALIN"
+                CopyTag.TextColor3 = Palette.TextSecondary
+                CopyTag.BackgroundColor3 = Palette.ObsidianBase
+                WordLabel.TextColor3 = Palette.TextPrimary
+            end
+        end)
+    end
+end
+
+-- Input Listeners
+InputAwalan:GetPropertyChangedSignal("Text"):Connect(function()
+    currentAwalan = InputAwalan.Text
+    UpdateWordList()
+end)
+
+InputAkhiran:GetPropertyChangedSignal("Text"):Connect(function()
+    currentAkhiran = InputAkhiran.Text
+    UpdateWordList()
+end)
+
+-- Status UI Updater
+local function UpdateTurnDisplay(isTurn, prefix)
+    isMyTurn = isTurn
+    local pfx = (prefix and prefix ~= "") and prefix:upper() or currentAwalan:upper()
+
+    if isTurn then
+        SubtitleTurn.Text = "● Giliran kamu! [ " .. pfx .. " ]"
+        SubtitleTurn.TextColor3 = Palette.EmeraldAccent
+        FloatDot.BackgroundColor3 = Palette.EmeraldAccent
+    else
+        SubtitleTurn.Text = "○ Menunggu giliran... [ " .. pfx .. " ]"
+        SubtitleTurn.TextColor3 = Palette.TextMuted
+        FloatDot.BackgroundColor3 = Palette.TextMuted
+    end
+end
+
+-- Detection Engine
+local function ApplyDetectedPrefix(prefix)
+    if not prefix or prefix == "" then return end
+    prefix = prefix:gsub("%s+", ""):lower()
+
+    currentAwalan = prefix
+    InputAwalan.Text = prefix
+
+    UpdateTurnDisplay(isMyTurn, prefix)
+    UpdateWordList()
+end
+
+-- 1. In-game Remote Event: UpdateWordIndex
+if UpdateWordIndex then
+    UpdateWordIndex.OnClientEvent:Connect(function(data)
+        if typeof(data) ~= "table" then return end
+
+        -- Sync all database words if sent
+        if typeof(data.AllWords) == "table" then
+            local count = 0
+            for w, _ in pairs(data.AllWords) do
+                if typeof(w) == "string" and #w > 1 then
+                    local clean = w:lower():gsub("%s+", "")
+                    if not KamusSet[clean] then
+                        KamusSet[clean] = true
+                        table.insert(KamusData, clean)
+                        count = count + 1
+                    end
+                end
+            end
+            if count > 0 then
+                UpdateWordList()
+            end
+            return
+        end
+
+        -- Word update on game board
+        if typeof(data.NewWord) == "string" and #data.NewWord > 0 then
+            local newWord = data.NewWord:lower():gsub("%s+", "")
+            if not KamusSet[newWord] then
+                KamusSet[newWord] = true
+                table.insert(KamusData, newWord)
+            end
+
+            if deteksiPrefixEnabled then
+                local nextPrefix = AmbilSukuKataTerakhir(newWord)
+                ApplyDetectedPrefix(nextPrefix)
+            end
+        end
+    end)
+end
+
+-- 2. In-game Remote Event: MatchUI
+if MatchRemote then
+    MatchRemote.OnClientEvent:Connect(function(action, value)
+        if action == "StartTurn" then
+            UpdateTurnDisplay(true, currentAwalan)
+        elseif action == "EndTurn" or action == "GameEnd" then
+            UpdateTurnDisplay(false, currentAwalan)
+        end
+    end)
+end
+
+-- 3. Request in-game official dictionary
+task.spawn(function()
+    if RequestWordIndex then
+        pcall(function()
+            RequestWordIndex:FireServer()
+        end)
+    end
+end)
+
+-- 4. External KBBI Dictionary Loader
+task.spawn(function()
+    local url = "https://raw.githubusercontent.com/thantzy/comission-script/refs/heads/main/samkat-kamus-2026-09-08.txt"
+    local success, data = pcall(function() return game:HttpGet(url) end)
+    if success and data then
+        for line in string.gmatch(data, "[^\r\n]+") do
+            local clean = line:lower():gsub("%s+", "")
+            if #clean > 1 and not KamusSet[clean] then
+                KamusSet[clean] = true
+                table.insert(KamusData, clean)
+            end
+        end
+        UpdateWordList()
+    end
+end)
+
+-- 5. Fallback GUI Scanner
+task.spawn(function()
+    while task.wait(0.5) do
+        if deteksiPrefixEnabled then
+            pcall(function()
+                local wordServer = PlayerGui:FindFirstChild("WordServer", true)
+                if wordServer and wordServer:IsA("TextLabel") and wordServer.Text ~= "" then
+                    local target = AmbilSukuKataTerakhir(wordServer.Text)
+                    if target ~= "" and target:lower() ~= currentAwalan:lower() then
+                        ApplyDetectedPrefix(target)
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- Initial presentation
+UpdateTurnDisplay(true, "T")
+UpdateWordList()
+
+print("ThanHub Sambung Kata Solver loaded successfully!")

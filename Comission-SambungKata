@@ -175,16 +175,8 @@ local function EkstrakPrefix(str)
     end
 
     local standalone = clean:match("^([%a]+)$")
-    if standalone and #standalone >= 1 and #standalone <= 2 then
-        local lower = standalone:lower()
-        local blacklist = {
-            ["ok"] = true, ["lv"] = true, ["no"] = true, ["vs"] = true, ["go"] = true,
-            ["id"] = true, ["ya"] = true, ["in"] = true, ["on"] = true, ["hp"] = true,
-            ["to"] = true, ["xp"] = true, ["cd"] = true, ["ui"] = true
-        }
-        if not blacklist[lower] then
-            return lower
-        end
+    if standalone and #standalone >= 1 and #standalone <= 3 then
+        return standalone:lower()
     end
 
     return nil

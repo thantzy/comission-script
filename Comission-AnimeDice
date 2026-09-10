@@ -2,7 +2,9 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local Stats = game:GetService("Stats")
+local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
@@ -34,6 +36,8 @@ _G.SmartCollect = true
 _G.OnlyUnlocked = true
 _G.TouchBypass = false
 _G.AntiAFK = true
+_G.InstantAttack = true
+_G.AttackDelay = 0.0
 
 local Network = nil
 local PlotComm = nil
@@ -250,12 +254,172 @@ local function collectAllSlots()
     end
 end
 
+local UIReferences = nil
+local TowerScreen = nil
+local TowerController = nil
+local TowerRefs = nil
+local Towers = nil
+
+pcall(function()
+    UIReferences = require(ReplicatedStorage.Framework.Features.UI.UIReferences)
+    if UIReferences and UIReferences.Root and UIReferences.Root.Tower then
+        TowerScreen = UIReferences.Root.Tower.Screen
+    end
+end)
+
+pcall(function()
+    TowerController = require(ReplicatedStorage.Framework.Features.Towers.TowerController)
+end)
+
+pcall(function()
+    TowerRefs = require(ReplicatedStorage.Framework.Features.Towers.TowerRefs)
+end)
+
+pcall(function()
+    Towers = require(ReplicatedStorage.Framework.Features.Towers.Towers)
+end)
+
+local function getTowerScreen()
+    if TowerScreen and TowerScreen.Parent then
+        return TowerScreen
+    end
+    pcall(function()
+        local uiRefs = require(ReplicatedStorage.Framework.Features.UI.UIReferences)
+        if uiRefs and uiRefs.Root and uiRefs.Root.Tower then
+            TowerScreen = uiRefs.Root.Tower.Screen
+        end
+    end)
+    return TowerScreen
+end
+
+local function isTowerAnimationInstance(inst)
+    if not inst then return false end
+    local name = inst.Name
+    if name == "YourCard" or name == "EnemyCard" or name == "DamagePopup" or name == "ImpactFlash" then
+        return true
+    end
+    local parent = inst.Parent
+    if parent then
+        local pName = parent.Name
+        if pName == "YourCard" or pName == "EnemyCard" or pName == "Screen" or pName == "Card" or pName == "HealthBar" or pName == "Bar" or pName == "CanvasGroup" then
+            return true
+        end
+        local pp = parent.Parent
+        if pp and (pp.Name == "YourCard" or pp.Name == "EnemyCard" or pp.Name == "Screen") then
+            return true
+        end
+    end
+    local screen = getTowerScreen()
+    if screen and (inst == screen or inst:IsDescendantOf(screen)) then
+        return true
+    end
+    return false
+end
+
+local function wrapClosure(fn)
+    if newcclosure then
+        return newcclosure(fn)
+    end
+    return fn
+end
+
+local isCaller = checkcaller or function() return false end
+
+local oldIndex = nil
+if hookmetamethod then
+    pcall(function()
+        oldIndex = hookmetamethod(game, "__index", wrapClosure(function(self, idx)
+            if _G.InstantAttack and not isCaller() and idx == "Visible" then
+                if typeof(self) == "Instance" then
+                    local name = self.Name
+                    if name == "YourCard" or name == "EnemyCard" then
+                        local isRam = true
+                        local ok, fnName = pcall(debug.info, 2, "n")
+                        if ok and type(fnName) == "string" and fnName ~= "" then
+                            isRam = (fnName == "animateRam")
+                        end
+                        if isRam and _G.AttackDelay and _G.AttackDelay > 0 then
+                            task.wait(_G.AttackDelay)
+                        end
+                        return false
+                    end
+                end
+            end
+            return oldIndex(self, idx)
+        end))
+    end)
+end
+
+local oldTweenCreate = nil
+if hookfunction then
+    pcall(function()
+        oldTweenCreate = hookfunction(TweenService.Create, wrapClosure(function(self, inst, tweenInfo, props)
+            if _G.InstantAttack and inst and typeof(inst) == "Instance" and isTowerAnimationInstance(inst) then
+                local speed = _G.AttackDelay or 0
+                local t = (speed > 0 and speed) or 0.001
+                if typeof(tweenInfo) == "TweenInfo" then
+                    tweenInfo = TweenInfo.new(t, tweenInfo.EasingStyle, tweenInfo.EasingDirection)
+                else
+                    tweenInfo = TweenInfo.new(t)
+                end
+            end
+            return oldTweenCreate(self, inst, tweenInfo, props)
+        end))
+    end)
+end
+
+local oldNamecall = nil
+if hookmetamethod then
+    pcall(function()
+        oldNamecall = hookmetamethod(game, "__namecall", wrapClosure(function(self, ...)
+            local method = getnamecallmethod()
+            if _G.InstantAttack and (method == "Create" or method == "create") and self == TweenService then
+                local args = {...}
+                local inst = args[1]
+                if inst and typeof(inst) == "Instance" and isTowerAnimationInstance(inst) then
+                    local speed = _G.AttackDelay or 0
+                    local t = (speed > 0 and speed) or 0.001
+                    if typeof(args[2]) == "TweenInfo" then
+                        args[2] = TweenInfo.new(t, args[2].EasingStyle, args[2].EasingDirection)
+                    else
+                        args[2] = TweenInfo.new(t)
+                    end
+                    if setnamecallmethod then
+                        setnamecallmethod("Create")
+                    end
+                    return oldNamecall(self, unpack(args))
+                end
+            end
+            return oldNamecall(self, ...)
+        end))
+    end)
+end
+
+local oldTaskWait = nil
+if hookfunction then
+    pcall(function()
+        oldTaskWait = hookfunction(task.wait, wrapClosure(function(n)
+            if _G.InstantAttack then
+                local ok, src = pcall(debug.info, 2, "s")
+                if ok and type(src) == "string" and (src:lower():find("tower") or src:lower():find("sequence")) then
+                    local speed = _G.AttackDelay or 0
+                    if speed > 0 then
+                        return oldTaskWait(speed)
+                    end
+                    return oldTaskWait(0)
+                end
+            end
+            return oldTaskWait(n)
+        end))
+    end)
+end
+
 local window = NeverLose:CreateWindow({
     Logo = NeverLose.GlobalLogo,
     Name = "ThanHub",
-    Content = "Auto Collect",
+    Content = "Auto Collect & Tower",
     Size = UserInputService.TouchEnabled and NeverLose.Scales.Mobile or NeverLose.Scales.Default,
-    ConfigFolder = "ThanHub_AutoCollect",
+    ConfigFolder = "ThanHub_Config",
     Enable3DRenderer = false,
     Keybind = "Insert"
 })
@@ -321,8 +485,8 @@ CollectSpeedSlider:AddSlider({
     Default = 0.5,
     Min = 0.05,
     Max = 3.0,
-    Step = 0.05,
-    Precisions = 2,
+    Rounding = 2,
+    Type = "s",
     Callback = function(Value)
         _G.CollectDelay = Value
     end,
@@ -335,8 +499,8 @@ SlotDelaySlider:AddSlider({
     Default = 0.02,
     Min = 0.0,
     Max = 0.2,
-    Step = 0.01,
-    Precisions = 2,
+    Rounding = 2,
+    Type = "s",
     Callback = function(Value)
         _G.SlotDelay = Value
     end,
@@ -391,13 +555,109 @@ AntiAfkToggle:AddToggle({
 })
 
 pcall(function()
+    if getconnections then
+        for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
+            if conn.Disable then
+                conn:Disable()
+            elseif conn.Disconnect then
+                conn:Disconnect()
+            end
+        end
+    end
+end)
+
+pcall(function()
     LocalPlayer.Idled:Connect(function()
         if _G.AntiAFK then
-            VirtualUser:CaptureController()
-            VirtualUser:ClickButton2(Vector2.new(0, 0))
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.new(0, 0))
+            end)
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
+            end)
+            pcall(function()
+                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+                task.wait(0.05)
+                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+            end)
         end
     end)
 end)
+
+task.spawn(function()
+    while true do
+        task.wait(45)
+        if _G.AntiAFK then
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
+            end)
+            pcall(function()
+                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+                task.wait(0.05)
+                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+            end)
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.new(0, 0))
+            end)
+        end
+    end
+end)
+
+pcall(function()
+    local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+    if ps then
+        for _, scr in ipairs(ps:GetDescendants()) do
+            if scr:IsA("LocalScript") and (scr.Name:lower():find("afk") or scr.Name:lower():find("idle")) then
+                scr.Disabled = true
+            end
+        end
+    end
+end)
+
+local TowerTab = window:AddTab({
+    Icon = 'swords',
+    Name = "Tower",
+})
+
+local TowerSection = TowerTab:AddSection({
+    Name = "Tower Attack",
+    Position = 'left'
+})
+
+local InstantAttackToggle = TowerSection:AddLabel('Instant Attack')
+InstantAttackToggle:ToolTip("Menyerang tanpa jeda animasi ramming kartu")
+InstantAttackToggle:AddToggle({
+    Default = true,
+    Callback = function(Value)
+        _G.InstantAttack = Value
+        NeverLose:CreateNotification().new({
+            Title = "Tower Attack",
+            Content = Value and "Instant Attack diaktifkan" or "Instant Attack dimatikan",
+            Duration = 2
+        })
+    end,
+    Flag = "InstantAttackToggle",
+})
+
+local AttackDelaySlider = TowerSection:AddLabel('Attack Delay')
+AttackDelaySlider:ToolTip("Jeda waktu antar pukulan kartu (detik)")
+AttackDelaySlider:AddSlider({
+    Default = 0.0,
+    Min = 0.0,
+    Max = 0.3,
+    Rounding = 3,
+    Type = "s",
+    Callback = function(Value)
+        _G.AttackDelay = Value
+    end,
+    Flag = "AttackDelaySlider",
+})
 
 NeverLose:CreateNotification().new({
     Title = "ThanHub",

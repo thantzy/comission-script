@@ -7,23 +7,47 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local Camera = workspace.CurrentCamera
 
-if game:GetService("CoreGui"):FindFirstChild("ThanHub_KataSolver_UI") then
-    game:GetService("CoreGui").ThanHub_KataSolver_UI:Destroy()
-end
-if PlayerGui:FindFirstChild("ThanHub_KataSolver_UI") then
-    PlayerGui.ThanHub_KataSolver_UI:Destroy()
+local HttpService = game:GetService("HttpService")
+
+-- Clean up any previous GUI instance via global reference
+if getgenv and getgenv()._ThanHub_KataSolver_GUI then
+    pcall(function()
+        getgenv()._ThanHub_KataSolver_GUI:Destroy()
+    end)
+    getgenv()._ThanHub_KataSolver_GUI = nil
 end
 
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "ThanHub_KataSolver_UI"
+ScreenGui.Name = (HttpService and HttpService:GenerateGUID(false):gsub("-", ""):sub(1, 14)) or "RobloxGui_Layer"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Archivable = false
 
-local pcallGui = pcall(function()
-    ScreenGui.Parent = game:GetService("CoreGui")
-end)
-if not pcallGui or not ScreenGui.Parent then
-    ScreenGui.Parent = PlayerGui
+-- Protect GUI using executor protectgui / syn.protect_gui / protect_gui
+if syn and typeof(syn) == "table" and syn.protect_gui then
+    pcall(syn.protect_gui, ScreenGui)
+elseif typeof(protectgui) == "function" then
+    pcall(protectgui, ScreenGui)
+elseif typeof(protect_gui) == "function" then
+    pcall(protect_gui, ScreenGui)
+end
+
+-- Resolve safe container (gethui preferred for 100% hidden CoreGui container)
+local safeParent = nil
+if typeof(gethui) == "function" then
+    safeParent = gethui()
+else
+    local success = pcall(function()
+        safeParent = game:GetService("CoreGui")
+    end)
+    if not success or not safeParent then
+        safeParent = PlayerGui
+    end
+end
+
+ScreenGui.Parent = safeParent
+if getgenv then
+    getgenv()._ThanHub_KataSolver_GUI = ScreenGui
 end
 
 local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10) or ReplicatedStorage:FindFirstChild("Remotes")
@@ -1056,9 +1080,9 @@ local function CheckCurrentlyMyTurn()
 end
 
 local function CariPrefixDiLocalPlayer()
-
     local wordServer = PlayerGui:FindFirstChild("WordServer", true)
     if wordServer and (wordServer:IsA("TextLabel") or wordServer:IsA("TextBox")) and wordServer.Visible and wordServer.Text ~= "" then
+        if wordServer:IsA("TextLabel") and HookTextLabel then HookTextLabel(wordServer) end
         local p = EkstrakPrefix(wordServer.Text)
         if p and p ~= "" then
             return p, wordServer
@@ -1071,6 +1095,7 @@ local function CariPrefixDiLocalPlayer()
                 if v:IsA("TextLabel") and v.Visible and v.Text ~= "" then
                     local text = v.Text
                     if text:find("Hurufnya") or text:find("hurufnya") or text:find("Huruf:") then
+                        if HookTextLabel then HookTextLabel(v) end
                         local p = EkstrakPrefix(text)
                         if p and p ~= "" then
                             return p, v
@@ -1080,6 +1105,7 @@ local function CariPrefixDiLocalPlayer()
                         if parent then
                             for _, sib in ipairs(parent:GetChildren()) do
                                 if sib ~= v and (sib:IsA("TextLabel") or sib:IsA("TextBox")) and sib.Visible and sib.Text ~= "" then
+                                    if sib:IsA("TextLabel") and HookTextLabel then HookTextLabel(sib) end
                                     local sibPfx = EkstrakPrefix(sib.Text)
                                     if sibPfx and sibPfx ~= "" then
                                         return sibPfx, sib
@@ -1095,7 +1121,71 @@ local function CariPrefixDiLocalPlayer()
 
     return nil, nil
 end
+-- =========================================================================
+-- STEALTH EVENT-DRIVEN HOOKS FOR PREFIX DETECTION
+-- =========================================================================
+local hookedTextLabels = {}
 
+local function ProcessPotentialPrefix(text, sourceInstance)
+    if not text or typeof(text) ~= "string" or text == "" then return end
+    if not deteksiPrefixEnabled then return end
+
+    local pfx = EkstrakPrefix(text)
+    if pfx and pfx ~= "" then
+        if isMyTurn or CheckCurrentlyMyTurn() then
+            if pfx ~= currentAwalan:lower() then
+                ApplyDetectedPrefix(pfx)
+            end
+        end
+    end
+end
+
+local function HookTextLabel(lbl)
+    if not lbl or not lbl:IsA("TextLabel") or hookedTextLabels[lbl] then return end
+    hookedTextLabels[lbl] = true
+
+    lbl:GetPropertyChangedSignal("Text"):Connect(function()
+        ProcessPotentialPrefix(lbl.Text, lbl)
+    end)
+    lbl:GetPropertyChangedSignal("Visible"):Connect(function()
+        if lbl.Visible then
+            ProcessPotentialPrefix(lbl.Text, lbl)
+        end
+    end)
+end
+
+PlayerGui.DescendantAdded:Connect(function(desc)
+    if desc:IsA("TextLabel") then
+        local name = desc.Name:lower()
+        if name:find("word") or name:find("huruf") or name:find("text") or name:find("prefix") then
+            HookTextLabel(desc)
+        end
+    end
+end)
+
+-- Pure Native Signal Listeners
+local function ScanAndHookAllLabels()
+    pcall(function()
+        for _, gui in ipairs(PlayerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui ~= ScreenGui and gui.Enabled then
+                for _, v in ipairs(gui:GetDescendants()) do
+                    if v:IsA("TextLabel") then
+                        local name = v.Name:lower()
+                        local text = v.Text:lower()
+                        if name:find("word") or name:find("huruf") or text:find("huruf") or text:find("hurufnya") or text:find("huruf:") then
+                            HookTextLabel(v)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+task.spawn(function()
+    task.wait(0.5)
+    ScanAndHookAllLabels()
+end)
 if TurnCamera then
     TurnCamera.OnClientEvent:Connect(function(targetPlayer)
         if targetPlayer and (targetPlayer == LocalPlayer or targetPlayer.Name == LocalPlayer.Name or (typeof(targetPlayer) == "Instance" and targetPlayer:IsA("Model") and targetPlayer == LocalPlayer.Character)) then
@@ -1152,13 +1242,7 @@ if UpdateWordIndex then
     end)
 end
 
-task.spawn(function()
-    if RequestWordIndex then
-        pcall(function()
-            RequestWordIndex:FireServer()
-        end)
-    end
-end)
+-- Word index synced via local dictionary
 
 task.spawn(function()
     local url = "https://raw.githubusercontent.com/thantzy/comission-script/refs/heads/main/samkat-kamus-2026-09-08.txt"

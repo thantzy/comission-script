@@ -1,1 +1,406 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+local Stats = game:GetService("Stats")
 
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    repeat task.wait() until Players.LocalPlayer
+    LocalPlayer = Players.LocalPlayer
+end
+
+local NeverLose = nil
+local success = pcall(function()
+    NeverLose = loadstring(game:HttpGet("https://raw.githubusercontent.com/4lpaca-pin/NeverLose/refs/heads/main/source.luau"))()
+end)
+
+if not success or not NeverLose then
+    pcall(function()
+        if readfile and isfile and isfile("NEVERLOSEUI.lua") then
+            NeverLose = loadstring(readfile("NEVERLOSEUI.lua"))()
+        end
+    end)
+end
+
+if not NeverLose then
+    return
+end
+
+_G.AutoCollect = false
+_G.CollectDelay = 0.5
+_G.SlotDelay = 0.02
+_G.SmartCollect = true
+_G.OnlyUnlocked = true
+_G.TouchBypass = false
+_G.AntiAFK = true
+
+local Network = nil
+local PlotComm = nil
+local CollectSignal = nil
+local PlotIdProperty = nil
+local MyPlotId = nil
+
+pcall(function()
+    Network = require(ReplicatedStorage.Packages.Network)
+    PlotComm = Network.ClientComm.new(ReplicatedStorage.Network, false, "PlotService")
+    CollectSignal = PlotComm:GetSignal("CollectBalance")
+    PlotIdProperty = PlotComm:GetProperty("PlotId")
+
+    if PlotIdProperty then
+        if PlotIdProperty.Get then
+            pcall(function()
+                local id = PlotIdProperty:Get()
+                if id then MyPlotId = id end
+            end)
+        end
+        PlotIdProperty:Observe(function(id)
+            if id then
+                MyPlotId = id
+            end
+        end)
+    end
+end)
+
+local DataController = nil
+pcall(function()
+    DataController = require(ReplicatedStorage.Framework.Features.Data.DataController)
+end)
+
+local PlotConfig = nil
+pcall(function()
+    if ReplicatedStorage:FindFirstChild("Framework") 
+       and ReplicatedStorage.Framework:FindFirstChild("Features") 
+       and ReplicatedStorage.Framework.Features:FindFirstChild("Plot") then
+        PlotConfig = require(ReplicatedStorage.Framework.Features.Plot.PlotConfig)
+    end
+end)
+
+local function getCollectRemote()
+    if CollectSignal then return CollectSignal end
+    local net = ReplicatedStorage:FindFirstChild("Network")
+    if net then
+        local ps = net:FindFirstChild("PlotService")
+        if ps and ps:FindFirstChild("CollectBalance") then
+            return ps.CollectBalance
+        end
+        if net:FindFirstChild("CollectBalance") then
+            return net.CollectBalance
+        end
+    end
+    return nil
+end
+
+local function getMyPlot()
+    local claimed = workspace:FindFirstChild("Plots") and workspace.Plots:FindFirstChild("Claimed")
+    if not claimed then return nil end
+
+    if MyPlotId and claimed:FindFirstChild(MyPlotId) then
+        return claimed[MyPlotId]
+    end
+
+    if claimed:FindFirstChild(LocalPlayer.Name) then
+        return claimed[LocalPlayer.Name]
+    end
+    if claimed:FindFirstChild(tostring(LocalPlayer.UserId)) then
+        return claimed[tostring(LocalPlayer.UserId)]
+    end
+
+    for _, plot in ipairs(claimed:GetChildren()) do
+        local owner = plot:GetAttribute("Owner") or plot:GetAttribute("Player") or plot:GetAttribute("UserId")
+        if owner and (tostring(owner) == LocalPlayer.Name or tostring(owner) == tostring(LocalPlayer.UserId)) then
+            return plot
+        end
+        local ownerVal = plot:FindFirstChild("Owner") or plot:FindFirstChild("Player")
+        if ownerVal and (tostring(ownerVal.Value) == LocalPlayer.Name or tostring(ownerVal.Value) == tostring(LocalPlayer.UserId)) then
+            return plot
+        end
+    end
+
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local closestPlot = nil
+        local closestDist = math.huge
+        for _, plot in ipairs(claimed:GetChildren()) do
+            local spawn = plot:FindFirstChild("Spawn") or plot:FindFirstChild("Base")
+            if spawn and spawn:IsA("BasePart") then
+                local dist = (spawn.Position - hrp.Position).Magnitude
+                if dist < closestDist and dist < 200 then
+                    closestDist = dist
+                    closestPlot = plot
+                end
+            end
+        end
+        if closestPlot then return closestPlot end
+    end
+
+    local allPlots = claimed:GetChildren()
+    if #allPlots == 1 then
+        return allPlots[1]
+    end
+
+    return nil
+end
+
+local function isSlotUnlocked(slotId)
+    if not _G.OnlyUnlocked then return true end
+    if DataController and PlotConfig and PlotConfig.GetSlotRebirthRequirement and DataController.Rebirth then
+        local ok, unlocked = pcall(function()
+            local rebirth = DataController.Rebirth()
+            local req = PlotConfig.GetSlotRebirthRequirement(slotId)
+            return rebirth >= req
+        end)
+        if ok then return unlocked end
+    end
+    return true
+end
+
+local function getSlotBalance(slotId)
+    if DataController and DataController.Slots then
+        local ok, slotData = pcall(function()
+            local getter = DataController.Slots[tostring(slotId)]
+            if getter then return getter() end
+            return nil
+        end)
+        if ok and slotData then
+            return slotData.balance or 0
+        end
+    end
+    return 0
+end
+
+local function getAllSlots()
+    local plot = getMyPlot()
+    local slots = {}
+    if plot then
+        local slotsFolder = plot:FindFirstChild("Slots")
+        if slotsFolder then
+            for _, child in ipairs(slotsFolder:GetChildren()) do
+                local slotNum = tonumber(child.Name)
+                if slotNum then
+                    local bal = child:FindFirstChild("Balance")
+                    table.insert(slots, {
+                        Id = slotNum,
+                        Model = child,
+                        Hitbox = bal and bal:FindFirstChild("Hitbox")
+                    })
+                end
+            end
+        end
+    end
+    table.sort(slots, function(a, b) return a.Id < b.Id end)
+    return slots
+end
+
+local function collectSlot(slotId, slotInfo)
+    if not isSlotUnlocked(slotId) then return false end
+
+    if _G.SmartCollect then
+        local bal = getSlotBalance(slotId)
+        if bal <= 0 and DataController ~= nil then
+            return false
+        end
+    end
+
+    if CollectSignal then
+        pcall(function()
+            CollectSignal:Fire(slotId)
+        end)
+    else
+        local remote = getCollectRemote()
+        if remote and remote:IsA("RemoteEvent") then
+            pcall(function()
+                remote:FireServer(slotId)
+            end)
+        end
+    end
+
+    if _G.TouchBypass and slotInfo and slotInfo.Hitbox and firetouchinterest then
+        pcall(function()
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                firetouchinterest(hrp, slotInfo.Hitbox, 0)
+                task.wait(0.01)
+                firetouchinterest(hrp, slotInfo.Hitbox, 1)
+            end
+        end)
+    end
+
+    return true
+end
+
+local function collectAllSlots()
+    local slots = getAllSlots()
+    if #slots > 0 then
+        for _, slot in ipairs(slots) do
+            collectSlot(slot.Id, slot)
+            if _G.SlotDelay and _G.SlotDelay > 0 then
+                task.wait(_G.SlotDelay)
+            end
+        end
+    else
+        for id = 1, 20 do
+            collectSlot(id, nil)
+            if _G.SlotDelay and _G.SlotDelay > 0 then
+                task.wait(_G.SlotDelay)
+            end
+        end
+    end
+end
+
+local window = NeverLose:CreateWindow({
+    Logo = NeverLose.GlobalLogo,
+    Name = "ThanHub",
+    Content = "Auto Collect",
+    Size = UserInputService.TouchEnabled and NeverLose.Scales.Mobile or NeverLose.Scales.Default,
+    ConfigFolder = "ThanHub_AutoCollect",
+    Enable3DRenderer = false,
+    Keybind = "Insert"
+})
+
+local Watermark = window:Watermark()
+local pingBlock = Watermark:AddBlock("chart-four-vertical-bars", "0MS")
+local uiToggleBlock = Watermark:AddBlock("cube-vertexes", "ThanHub")
+
+uiToggleBlock:Input(function()
+    window:ToggleInterface()
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        local ping = 35
+        pcall(function()
+            local item = Stats.Network.ServerStatsItem:FindFirstChild("Data Ping")
+            if item then ping = math.floor(item:GetValue()) end
+        end)
+        pingBlock:SetText(tostring(ping) .. "MS")
+    end
+end)
+
+window:AddTabLabel('Main')
+
+local MainTab = window:AddTab({
+    Icon = 'coins',
+    Name = "Auto Collect",
+})
+
+local CollectSection = MainTab:AddSection({
+    Name = "Auto Collect",
+    Position = 'left'
+})
+
+local AutoCollectToggle = CollectSection:AddLabel('Auto Collect')
+AutoCollectToggle:ToolTip("Otomatis mengumpulkan uang dari semua slot")
+AutoCollectToggle:AddToggle({
+    Default = false,
+    Callback = function(Value)
+        _G.AutoCollect = Value
+        if Value then
+            task.spawn(function()
+                while _G.AutoCollect do
+                    pcall(collectAllSlots)
+                    task.wait(_G.CollectDelay)
+                end
+            end)
+            NeverLose:CreateNotification().new({
+                Title = "Auto Collect",
+                Content = "Auto Collect diaktifkan",
+                Duration = 2
+            })
+        end
+    end,
+    Flag = "AutoCollectToggle",
+})
+
+local CollectSpeedSlider = CollectSection:AddLabel('Collect Delay')
+CollectSpeedSlider:ToolTip("Jeda waktu antar putaran pengumpulan")
+CollectSpeedSlider:AddSlider({
+    Default = 0.5,
+    Min = 0.05,
+    Max = 3.0,
+    Step = 0.05,
+    Precisions = 2,
+    Callback = function(Value)
+        _G.CollectDelay = Value
+    end,
+    Flag = "CollectDelaySlider",
+})
+
+local SlotDelaySlider = CollectSection:AddLabel('Slot Delay')
+SlotDelaySlider:ToolTip("Jeda waktu antar setiap slot")
+SlotDelaySlider:AddSlider({
+    Default = 0.02,
+    Min = 0.0,
+    Max = 0.2,
+    Step = 0.01,
+    Precisions = 2,
+    Callback = function(Value)
+        _G.SlotDelay = Value
+    end,
+    Flag = "SlotDelaySlider",
+})
+
+local SmartCheckToggle = CollectSection:AddLabel('Smart Check')
+SmartCheckToggle:ToolTip("Hanya mengambil slot yang terisi uang")
+SmartCheckToggle:AddToggle({
+    Default = true,
+    Callback = function(Value)
+        _G.SmartCollect = Value
+    end,
+    Flag = "SmartCheckToggle",
+})
+
+local TouchBypassToggle = CollectSection:AddLabel('Hitbox Touch')
+TouchBypassToggle:ToolTip("Simulasi sentuh hitbox slot")
+TouchBypassToggle:AddToggle({
+    Default = false,
+    Callback = function(Value)
+        _G.TouchBypass = Value
+    end,
+    Flag = "TouchBypassToggle",
+})
+
+CollectSection:AddButton({
+    Name = "Collect Once",
+    Callback = function()
+        pcall(collectAllSlots)
+        NeverLose:CreateNotification().new({
+            Title = "Collect Once",
+            Content = "Berhasil mengumpulkan uang",
+            Duration = 2
+        })
+    end
+})
+
+local UtilitySection = MainTab:AddSection({
+    Name = "Utility",
+    Position = 'right'
+})
+
+local AntiAfkToggle = UtilitySection:AddLabel('Anti AFK')
+AntiAfkToggle:ToolTip("Mencegah disconnect karena AFK")
+AntiAfkToggle:AddToggle({
+    Default = true,
+    Callback = function(Value)
+        _G.AntiAFK = Value
+    end,
+    Flag = "AntiAfkToggle",
+})
+
+pcall(function()
+    LocalPlayer.Idled:Connect(function()
+        if _G.AntiAFK then
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end
+    end)
+end)
+
+NeverLose:CreateNotification().new({
+    Title = "ThanHub",
+    Content = "Script berhasil dimuat",
+    Duration = 3
+})

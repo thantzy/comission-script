@@ -61,6 +61,8 @@ local deteksiPrefixEnabled = true
 local isMyTurn = false
 local cameraTurnActive = false
 local isUpdatingInputProgrammatically = false
+local turnPrefixLocked = false
+local activeTurnPrefix = ""
 
 local UpdateWordList
 local UpdateTurnDisplay
@@ -122,28 +124,50 @@ local function TambahKataKeKamus(clean)
     table.insert(bs2, clean)
 end
 
+local function IsInputElement(inst)
+    if not inst then return true end
+    if inst:IsA("TextBox") then return true end
+
+    local curr = inst
+    local depth = 0
+    while curr and curr ~= PlayerGui and depth < 6 do
+        local name = curr.Name:lower()
+        if name:find("input") or name:find("type") or name:find("jawab")
+            or name:find("answer") or name:find("textbox") or name:find("box")
+            or name:find("chat") or name:find("bar") or name:find("entry")
+            or name:find("typed") or name:find("write") or name:find("field")
+            or name:find("keyboard") then
+            return true
+        end
+        curr = curr.Parent
+        depth = depth + 1
+    end
+    return false
+end
+
 local function EkstrakPrefix(str)
     if not str or type(str) ~= "string" then return nil end
     local clean = str:gsub("^%s*(.-)%s*$", "%1")
     if #clean == 0 then return nil end
 
-    local afterColon = clean:match(":%s*([%a]+)%s*$")
-    if afterColon and #afterColon >= 1 and #afterColon <= 8 then
-        return afterColon:lower()
-    end
-
     local setelahHuruf = clean:match("[Hh]urufnya%s+adalah%s*([%a]+)")
-    if setelahHuruf and #setelahHuruf >= 1 and #setelahHuruf <= 8 then
+    if setelahHuruf and #setelahHuruf >= 1 and #setelahHuruf <= 3 then
         return setelahHuruf:lower()
     end
 
-    local c1, c2, c3, c4 = clean:match("^([%a])%s+([%a])%s+([%a])%s+([%a])$")
-    if c1 and c2 and c3 and c4 then
-        return (c1 .. c2 .. c3 .. c4):lower()
+    local setelahTitikDua = clean:match("[Hh]uruf%s*:%s*([%a]+)") or clean:match("[Aa]walan%s*:%s*([%a]+)")
+    if setelahTitikDua and #setelahTitikDua >= 1 and #setelahTitikDua <= 3 then
+        return setelahTitikDua:lower()
     end
-    local d1, d2, d3 = clean:match("^([%a])%s+([%a])%s+([%a])$")
-    if d1 and d2 and d3 then
-        return (d1 .. d2 .. d3):lower()
+
+    local afterColon = clean:match(":%s*([%a]+)%s*$")
+    if afterColon and #afterColon >= 1 and #afterColon <= 3 then
+        return afterColon:lower()
+    end
+
+    local c1, c2, c3 = clean:match("^([%a])%s+([%a])%s+([%a])$")
+    if c1 and c2 and c3 then
+        return (c1 .. c2 .. c3):lower()
     end
     local e1, e2 = clean:match("^([%a])%s+([%a])$")
     if e1 and e2 then
@@ -151,13 +175,12 @@ local function EkstrakPrefix(str)
     end
 
     local standalone = clean:match("^([%a]+)$")
-    if standalone and #standalone >= 1 and #standalone <= 8 then
+    if standalone and #standalone >= 1 and #standalone <= 2 then
         local lower = standalone:lower()
         local blacklist = {
-            waktu = true, combo = true, normal = true, turn = true,
-            skipturn = true, vip = true, lv = true, level = true,
-            bermain = true, menu = true, thanhub = true, enter = true,
-            salin = true, reset = true, auto = true, detect = true
+            ["ok"] = true, ["lv"] = true, ["no"] = true, ["vs"] = true, ["go"] = true,
+            ["id"] = true, ["ya"] = true, ["in"] = true, ["on"] = true, ["hp"] = true,
+            ["to"] = true, ["xp"] = true, ["cd"] = true, ["ui"] = true
         }
         if not blacklist[lower] then
             return lower
@@ -618,8 +641,55 @@ ChipLabel.TextColor3 = Palette.EmeraldAccent
 ChipLabel.TextXAlignment = Enum.TextXAlignment.Left
 ChipLabel.Parent = ChipDetect
 
+local BtnShuffle = Instance.new("TextButton")
+BtnShuffle.Name = "BtnShuffle"
+BtnShuffle.Size = UDim2.new(0, 48, 1, 0)
+BtnShuffle.Position = UDim2.new(1, -100, 0, 0)
+BtnShuffle.BackgroundColor3 = Palette.CardDark
+BtnShuffle.BorderSizePixel = 0
+BtnShuffle.Font = Enum.Font.GothamBold
+BtnShuffle.Text = "🔀 Acak"
+BtnShuffle.TextSize = 8.5
+BtnShuffle.TextColor3 = Palette.TextSecondary
+BtnShuffle.Parent = Toolbar
+
+local BtnShuffleCorner = Instance.new("UICorner")
+BtnShuffleCorner.CornerRadius = UDim.new(0, 5)
+BtnShuffleCorner.Parent = BtnShuffle
+
+local BtnShuffleStroke = Instance.new("UIStroke")
+BtnShuffleStroke.Color = Palette.StrokeSubtle
+BtnShuffleStroke.Thickness = 0.8
+BtnShuffleStroke.Parent = BtnShuffle
+
+BtnShuffle.MouseEnter:Connect(function()
+    BtnShuffle.BackgroundColor3 = Palette.CardDarkHover
+    BtnShuffle.TextColor3 = Palette.VioletAccent
+    BtnShuffleStroke.Color = Palette.VioletAccent
+end)
+
+BtnShuffle.MouseLeave:Connect(function()
+    BtnShuffle.BackgroundColor3 = Palette.CardDark
+    BtnShuffle.TextColor3 = Palette.TextSecondary
+    BtnShuffleStroke.Color = Palette.StrokeSubtle
+end)
+
+BtnShuffle.MouseButton1Click:Connect(function()
+    BtnShuffle.Text = "✨ Acak!"
+    BtnShuffle.TextColor3 = Palette.EmeraldAccent
+    BtnShuffleStroke.Color = Palette.EmeraldAccent
+    UpdateWordList(true)
+    task.delay(0.5, function()
+        if BtnShuffle and BtnShuffle.Parent then
+            BtnShuffle.Text = "🔀 Acak"
+            BtnShuffle.TextColor3 = Palette.TextSecondary
+            BtnShuffleStroke.Color = Palette.StrokeSubtle
+        end
+    end)
+end)
+
 local BtnClear = Instance.new("TextButton")
-BtnClear.Size = UDim2.new(0, 48, 1, 0)
+BtnClear.Size = UDim2.new(0, 46, 1, 0)
 BtnClear.Position = UDim2.new(1, -48, 0, 0)
 BtnClear.BackgroundColor3 = Palette.CardDark
 BtnClear.BorderSizePixel = 0
@@ -638,6 +708,16 @@ BtnClearStroke.Color = Palette.StrokeSubtle
 BtnClearStroke.Thickness = 0.8
 BtnClearStroke.Parent = BtnClear
 
+BtnClear.MouseEnter:Connect(function()
+    BtnClear.BackgroundColor3 = Palette.CardDarkHover
+    BtnClear.TextColor3 = Palette.TextPrimary
+end)
+
+BtnClear.MouseLeave:Connect(function()
+    BtnClear.BackgroundColor3 = Palette.CardDark
+    BtnClear.TextColor3 = Palette.TextSecondary
+end)
+
 local function SetDetectState(enabled)
     deteksiPrefixEnabled = enabled
     if enabled then
@@ -648,6 +728,8 @@ local function SetDetectState(enabled)
         ChipDetect.BackgroundColor3 = Palette.EmeraldGlowBg
 
         if isMyTurn then
+            turnPrefixLocked = false
+            activeTurnPrefix = ""
             local pfx = CariPrefixDiLocalPlayer()
             if pfx and pfx ~= "" then
                 ApplyDetectedPrefix(pfx)
@@ -659,6 +741,8 @@ local function SetDetectState(enabled)
         ChipDot.BackgroundColor3 = Palette.TextMuted
         ChipStroke.Color = Palette.StrokeSubtle
         ChipDetect.BackgroundColor3 = Palette.CardDark
+        turnPrefixLocked = false
+        activeTurnPrefix = ""
     end
 end
 
@@ -669,6 +753,8 @@ end)
 BtnClear.MouseButton1Click:Connect(function()
     InputAkhiran.Text = ""
     currentAkhiran = ""
+    turnPrefixLocked = false
+    activeTurnPrefix = ""
     UpdateWordList()
 end)
 
@@ -837,7 +923,7 @@ task.spawn(function()
     end
 end)
 
-UpdateWordList = function()
+UpdateWordList = function(forceShuffle)
     local awalan = currentAwalan:lower():gsub("%s+", "")
     local akhiran = currentAkhiran:lower():gsub("%s+", "")
 
@@ -885,38 +971,87 @@ UpdateWordList = function()
     local awalanLen = #awalan
     local akhiranLen = #akhiran
 
-    for i = 1, #candidates do
-        local word = candidates[i]
-        local match = true
-
-        if checkPrefix and word:sub(1, awalanLen) ~= awalan then
-            match = false
-        end
-
-        if match and checkSuffix and word:sub(-akhiranLen) ~= akhiran then
-            match = false
-        end
-
-        if match then
-            table.insert(results, word)
-            if #results >= limit then
-                break
-            end
-        end
-    end
-
-    if #results == 0 and #akhiran > 0 then
-        isFallback = true
+    if forceShuffle then
+        local matches = {}
         for i = 1, #candidates do
             local word = candidates[i]
             local match = true
+
             if checkPrefix and word:sub(1, awalanLen) ~= awalan then
                 match = false
             end
+
+            if match and checkSuffix and word:sub(-akhiranLen) ~= akhiran then
+                match = false
+            end
+
+            if match then
+                table.insert(matches, word)
+            end
+        end
+
+        if #matches == 0 and #akhiran > 0 then
+            isFallback = true
+            for i = 1, #candidates do
+                local word = candidates[i]
+                local match = true
+                if checkPrefix and word:sub(1, awalanLen) ~= awalan then
+                    match = false
+                end
+                if match then
+                    table.insert(matches, word)
+                end
+            end
+        end
+
+        local totalMatches = #matches
+        if totalMatches <= limit then
+            for i = totalMatches, 2, -1 do
+                local j = math.random(1, i)
+                matches[i], matches[j] = matches[j], matches[i]
+            end
+            results = matches
+        else
+            for i = 1, limit do
+                local j = math.random(i, totalMatches)
+                matches[i], matches[j] = matches[j], matches[i]
+                table.insert(results, matches[i])
+            end
+        end
+    else
+        for i = 1, #candidates do
+            local word = candidates[i]
+            local match = true
+
+            if checkPrefix and word:sub(1, awalanLen) ~= awalan then
+                match = false
+            end
+
+            if match and checkSuffix and word:sub(-akhiranLen) ~= akhiran then
+                match = false
+            end
+
             if match then
                 table.insert(results, word)
                 if #results >= limit then
                     break
+                end
+            end
+        end
+
+        if #results == 0 and #akhiran > 0 then
+            isFallback = true
+            for i = 1, #candidates do
+                local word = candidates[i]
+                local match = true
+                if checkPrefix and word:sub(1, awalanLen) ~= awalan then
+                    match = false
+                end
+                if match then
+                    table.insert(results, word)
+                    if #results >= limit then
+                        break
+                    end
                 end
             end
         end
@@ -928,6 +1063,9 @@ UpdateWordList = function()
     elseif #results == 0 then
         BannerText.Text = string.format("❌ Tidak ada kata untuk [ %s ]", awalanDisp)
         BannerText.TextColor3 = Color3.fromRGB(255, 95, 95)
+    elseif forceShuffle then
+        BannerText.Text = string.format("🔀 [ %s ] ➔ [ %s ]  •  %d kata acak", awalanDisp, akhiranDisp, #results)
+        BannerText.TextColor3 = Palette.VioletAccent
     else
         BannerText.Text = string.format("🔎 [ %s ] ➔ [ %s ]  •  %d kata", awalanDisp, akhiranDisp, #results)
         BannerText.TextColor3 = Palette.TextSecondary
@@ -997,6 +1135,9 @@ end
 ApplyDetectedPrefix = function(prefix)
     if not prefix or prefix == "" then return end
     prefix = prefix:gsub("%s+", ""):lower()
+
+    activeTurnPrefix = prefix
+    turnPrefixLocked = true
 
     SetAwalanSilently(prefix)
     UpdateTurnDisplay(true, prefix)
@@ -1081,8 +1222,8 @@ end
 
 local function CariPrefixDiLocalPlayer()
     local wordServer = PlayerGui:FindFirstChild("WordServer", true)
-    if wordServer and (wordServer:IsA("TextLabel") or wordServer:IsA("TextBox")) and wordServer.Visible and wordServer.Text ~= "" then
-        if wordServer:IsA("TextLabel") and HookTextLabel then HookTextLabel(wordServer) end
+    if wordServer and wordServer:IsA("TextLabel") and not IsInputElement(wordServer) and wordServer.Visible and wordServer.Text ~= "" then
+        if HookTextLabel then HookTextLabel(wordServer) end
         local p = EkstrakPrefix(wordServer.Text)
         if p and p ~= "" then
             return p, wordServer
@@ -1092,9 +1233,9 @@ local function CariPrefixDiLocalPlayer()
     for _, gui in ipairs(PlayerGui:GetChildren()) do
         if gui:IsA("ScreenGui") and gui ~= ScreenGui and gui.Enabled then
             for _, v in ipairs(gui:GetDescendants()) do
-                if v:IsA("TextLabel") and v.Visible and v.Text ~= "" then
+                if v:IsA("TextLabel") and not IsInputElement(v) and v.Visible and v.Text ~= "" then
                     local text = v.Text
-                    if text:find("Hurufnya") or text:find("hurufnya") or text:find("Huruf:") then
+                    if text:find("Hurufnya") or text:find("hurufnya") or text:find("Huruf:") or text:find("Awalan:") then
                         if HookTextLabel then HookTextLabel(v) end
                         local p = EkstrakPrefix(text)
                         if p and p ~= "" then
@@ -1104,10 +1245,10 @@ local function CariPrefixDiLocalPlayer()
                         local parent = v.Parent
                         if parent then
                             for _, sib in ipairs(parent:GetChildren()) do
-                                if sib ~= v and (sib:IsA("TextLabel") or sib:IsA("TextBox")) and sib.Visible and sib.Text ~= "" then
-                                    if sib:IsA("TextLabel") and HookTextLabel then HookTextLabel(sib) end
+                                if sib ~= v and sib:IsA("TextLabel") and not IsInputElement(sib) and sib.Visible and sib.Text ~= "" then
                                     local sibPfx = EkstrakPrefix(sib.Text)
                                     if sibPfx and sibPfx ~= "" then
+                                        if HookTextLabel then HookTextLabel(sib) end
                                         return sibPfx, sib
                                     end
                                 end
@@ -1122,18 +1263,29 @@ local function CariPrefixDiLocalPlayer()
     return nil, nil
 end
 -- =========================================================================
--- STEALTH EVENT-DRIVEN HOOKS FOR PREFIX DETECTION
+-- STEALTH EVENT-DRIVEN HOOKS FOR PREFIX DETECTION (INPUT-ISOLATED)
 -- =========================================================================
 local hookedTextLabels = {}
 
 local function ProcessPotentialPrefix(text, sourceInstance)
     if not text or typeof(text) ~= "string" or text == "" then return end
     if not deteksiPrefixEnabled then return end
+    if sourceInstance and IsInputElement(sourceInstance) then return end
+
+    local isExplicitPrompt = false
+    local lowerText = text:lower()
+    if lowerText:find("hurufnya") or lowerText:find("huruf:") or lowerText:find("awalan:") then
+        isExplicitPrompt = true
+    end
+
+    if isMyTurn and turnPrefixLocked and not isExplicitPrompt then
+        return
+    end
 
     local pfx = EkstrakPrefix(text)
     if pfx and pfx ~= "" then
         if isMyTurn or CheckCurrentlyMyTurn() then
-            if pfx ~= currentAwalan:lower() then
+            if pfx ~= currentAwalan:lower() or not turnPrefixLocked then
                 ApplyDetectedPrefix(pfx)
             end
         end
@@ -1142,6 +1294,7 @@ end
 
 local function HookTextLabel(lbl)
     if not lbl or not lbl:IsA("TextLabel") or hookedTextLabels[lbl] then return end
+    if IsInputElement(lbl) then return end
     hookedTextLabels[lbl] = true
 
     lbl:GetPropertyChangedSignal("Text"):Connect(function()
@@ -1155,9 +1308,9 @@ local function HookTextLabel(lbl)
 end
 
 PlayerGui.DescendantAdded:Connect(function(desc)
-    if desc:IsA("TextLabel") then
+    if desc:IsA("TextLabel") and not IsInputElement(desc) then
         local name = desc.Name:lower()
-        if name:find("word") or name:find("huruf") or name:find("text") or name:find("prefix") then
+        if name:find("huruf") or name:find("prefix") or name == "wordserver" then
             HookTextLabel(desc)
         end
     end
@@ -1169,10 +1322,11 @@ local function ScanAndHookAllLabels()
         for _, gui in ipairs(PlayerGui:GetChildren()) do
             if gui:IsA("ScreenGui") and gui ~= ScreenGui and gui.Enabled then
                 for _, v in ipairs(gui:GetDescendants()) do
-                    if v:IsA("TextLabel") then
+                    if v:IsA("TextLabel") and not IsInputElement(v) then
                         local name = v.Name:lower()
                         local text = v.Text:lower()
-                        if name:find("word") or name:find("huruf") or text:find("huruf") or text:find("hurufnya") or text:find("huruf:") then
+                        if name:find("huruf") or name:find("prefix") or name == "wordserver"
+                            or text:find("huruf") or text:find("hurufnya") or text:find("huruf:") or text:find("awalan:") then
                             HookTextLabel(v)
                         end
                     end
@@ -1192,11 +1346,13 @@ if TurnCamera then
 
             cameraTurnActive = true
             isMyTurn = true
+            turnPrefixLocked = false
+            activeTurnPrefix = ""
             UpdateTurnDisplay(true, currentAwalan)
 
             task.spawn(function()
                 task.wait(0.6)
-                if isMyTurn and deteksiPrefixEnabled then
+                if isMyTurn and deteksiPrefixEnabled and not turnPrefixLocked then
                     local pfx = CariPrefixDiLocalPlayer()
                     if pfx and pfx ~= "" then
                         ApplyDetectedPrefix(pfx)
@@ -1207,6 +1363,8 @@ if TurnCamera then
 
             cameraTurnActive = false
             isMyTurn = false
+            turnPrefixLocked = false
+            activeTurnPrefix = ""
             UpdateTurnDisplay(false, nil)
             BannerText.Text = "⏳ Menunggu giliran kamu..."
             BannerText.TextColor3 = Palette.TextSecondary
@@ -1294,6 +1452,8 @@ task.spawn(function()
     local initialTurn = CheckCurrentlyMyTurn()
     if initialTurn then
         isMyTurn = true
+        turnPrefixLocked = false
+        activeTurnPrefix = ""
         UpdateTurnDisplay(true, currentAwalan)
         local pfx = CariPrefixDiLocalPlayer()
         if pfx and pfx ~= "" then
@@ -1301,6 +1461,8 @@ task.spawn(function()
         end
     else
         isMyTurn = false
+        turnPrefixLocked = false
+        activeTurnPrefix = ""
         UpdateTurnDisplay(false, nil)
         BannerText.Text = "⏳ Menunggu giliran kamu..."
         BannerText.TextColor3 = Palette.TextSecondary
@@ -1314,6 +1476,8 @@ task.spawn(function()
         if wasMyTurn and not activeTurn then
             isMyTurn = false
             cameraTurnActive = false
+            turnPrefixLocked = false
+            activeTurnPrefix = ""
             UpdateTurnDisplay(false, nil)
             BannerText.Text = "⏳ Menunggu giliran kamu..."
             BannerText.TextColor3 = Palette.TextSecondary
@@ -1321,11 +1485,13 @@ task.spawn(function()
 
         if not wasMyTurn and activeTurn then
             isMyTurn = true
+            turnPrefixLocked = false
+            activeTurnPrefix = ""
             UpdateTurnDisplay(true, currentAwalan)
             if deteksiPrefixEnabled then
                 task.spawn(function()
                     task.wait(0.5)
-                    if isMyTurn then
+                    if isMyTurn and not turnPrefixLocked then
                         local pfx = CariPrefixDiLocalPlayer()
                         if pfx and pfx ~= "" then
                             ApplyDetectedPrefix(pfx)
@@ -1337,10 +1503,10 @@ task.spawn(function()
 
         wasMyTurn = activeTurn
 
-        if isMyTurn and activeTurn and deteksiPrefixEnabled then
+        if isMyTurn and activeTurn and deteksiPrefixEnabled and not turnPrefixLocked then
             pcall(function()
                 local pfx = CariPrefixDiLocalPlayer()
-                if pfx and pfx ~= "" and pfx ~= currentAwalan:lower() then
+                if pfx and pfx ~= "" then
                     ApplyDetectedPrefix(pfx)
                 end
             end)

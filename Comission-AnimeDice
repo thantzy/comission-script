@@ -5,6 +5,7 @@ local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local Stats = game:GetService("Stats")
 local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
@@ -33,11 +34,93 @@ _G.AutoCollect = false
 _G.CollectDelay = 0.5
 _G.SlotDelay = 0.02
 _G.SmartCollect = true
-_G.OnlyUnlocked = true
-_G.TouchBypass = false
 _G.AntiAFK = true
-_G.InstantAttack = true
-_G.AttackDelay = 0.0
+_G.FastRoll = false
+_G.InstantRoll = false
+_G.RollDelay = 0.01
+_G.RollThreads = 3
+
+local function wrapClosure(fn)
+    if newcclosure then
+        return newcclosure(fn)
+    end
+    return fn
+end
+
+pcall(function()
+    if hookfunction and TeleportService and TeleportService.Teleport then
+        local oldTeleport = nil
+        oldTeleport = hookfunction(TeleportService.Teleport, wrapClosure(function(self, ...)
+            if _G.AntiAFK then
+                return
+            end
+            return oldTeleport(self, ...)
+        end))
+    end
+end)
+
+pcall(function()
+    if hookmetamethod then
+        local oldNamecall = nil
+        oldNamecall = hookmetamethod(game, "__namecall", wrapClosure(function(self, ...)
+            local method = getnamecallmethod()
+            if (method == "Teleport" or method == "teleport" or method == "TeleportToPlaceInstance") and _G.AntiAFK then
+                if self == TeleportService then
+                    return
+                end
+            end
+            return oldNamecall(self, ...)
+        end))
+    end
+end)
+
+pcall(function()
+    local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+    if ps then
+        local afkScript = ps:FindFirstChild("AFK")
+        if afkScript then
+            pcall(function() afkScript.Disabled = true end)
+            pcall(function() afkScript:Destroy() end)
+        end
+        ps.ChildAdded:Connect(function(child)
+            if child.Name == "AFK" then
+                pcall(function() child.Disabled = true end)
+                pcall(function() child:Destroy() end)
+            end
+        end)
+    end
+end)
+
+pcall(function()
+    if getgc then
+        for _, obj in ipairs(getgc(true)) do
+            if type(obj) == "function" then
+                local ok, consts = pcall(debug.getconstants, obj)
+                if ok and consts and table.find(consts, 1140) then
+                    if debug.getupvalues and debug.setupvalue then
+                        pcall(function()
+                            local uvs = debug.getupvalues(obj)
+                            for idx, val in pairs(uvs) do
+                                if type(val) == "thread" then
+                                    pcall(task.cancel, val)
+                                    debug.setupvalue(obj, idx, nil)
+                                end
+                            end
+                        end)
+                    end
+                    if hookfunction then
+                        hookfunction(obj, wrapClosure(function(...)
+                            return
+                        end))
+                    end
+                end
+            end
+        end
+    end
+end)
+
+
+local isCaller = checkcaller or function() return false end
 
 local Network = nil
 local PlotComm = nil
@@ -66,16 +149,286 @@ pcall(function()
     end
 end)
 
+local RollComm = nil
+local RollDiceFunction = nil
+local SetAutoRollSignal = nil
+
+pcall(function()
+    if Network then
+        RollComm = Network.ClientComm.new(ReplicatedStorage.Network, false, "RollService")
+        RollDiceFunction = RollComm:GetFunction("RollDice")
+        SetAutoRollSignal = RollComm:GetSignal("SetAutoRoll")
+    end
+end)
+
+local RollController = nil
+local RollCutscene = nil
+local RollUtil = nil
+local BuffController = nil
+local SpinController = nil
+local EntryDropController = nil
 local DataController = nil
+
+pcall(function()
+    RollController = require(ReplicatedStorage.Framework.Features.Rolling.RollController)
+end)
+
+pcall(function()
+    RollCutscene = require(ReplicatedStorage.Framework.Features.Rolling.RollCutscene)
+end)
+
+pcall(function()
+    RollUtil = require(ReplicatedStorage.Framework.Features.Rolling.RollUtil)
+end)
+
+pcall(function()
+    BuffController = require(ReplicatedStorage.Framework.Features.Buffs.BuffController)
+end)
+
+pcall(function()
+    SpinController = require(ReplicatedStorage.Framework.Features.Inventory.Kinds.Spin.SpinController)
+end)
+
+pcall(function()
+    EntryDropController = require(ReplicatedStorage.Framework.Features.Notifications.EntryDropController)
+end)
+
 pcall(function()
     DataController = require(ReplicatedStorage.Framework.Features.Data.DataController)
 end)
 
+if BuffController and BuffController.GetBuff then
+    local oldGetBuff = BuffController.GetBuff
+    BuffController.GetBuff = function(name, ...)
+        if (_G.FastRoll or _G.InstantRoll) and name == "Roll Duration" then
+            return 0
+        end
+        return oldGetBuff(name, ...)
+    end
+end
+
+if SpinController and SpinController.PlayShower then
+    local oldShower = SpinController.PlayShower
+    SpinController.PlayShower = function(...)
+        if _G.FastRoll or _G.InstantRoll then
+            return
+        end
+        return oldShower(...)
+    end
+end
+
+if EntryDropController and EntryDropController.Play then
+    local oldPlay = EntryDropController.Play
+    EntryDropController.Play = function(...)
+        if _G.FastRoll or _G.InstantRoll then
+            return
+        end
+        return oldPlay(...)
+    end
+end
+
+if RollCutscene and typeof(RollCutscene) == "function" and hookfunction then
+    hookfunction(RollCutscene, wrapClosure(function(...)
+        if _G.FastRoll or _G.InstantRoll then
+            return
+        end
+    end))
+end
+
+if RollController and RollController.RollState then
+    task.spawn(function()
+        while true do
+            task.wait(0.05)
+            if _G.FastRoll or _G.InstantRoll then
+                pcall(function()
+                    RollController.RollState(false)
+                end)
+            end
+        end
+    end)
+end
+
+pcall(function()
+    if getgc then
+        for _, obj in ipairs(getgc(true)) do
+            if type(obj) == "function" then
+                local ok, consts = pcall(debug.getconstants, obj)
+                if ok and consts then
+                    if table.find(consts, "PlayShower") and table.find(consts, "Roll Duration") then
+                        if debug.getupvalues and debug.setupvalue then
+                            pcall(function()
+                                local cutsceneFn = debug.getupvalue(obj, 22)
+                                if typeof(cutsceneFn) == "function" and hookfunction then
+                                    hookfunction(cutsceneFn, wrapClosure(function(...)
+                                        return
+                                    end))
+                                end
+                            end)
+                        end
+                        if hookfunction then
+                            local oldR = nil
+                            oldR = hookfunction(obj, wrapClosure(function(p13, u14, u15, u16, p17)
+                                if _G.FastRoll or _G.InstantRoll then
+                                    pcall(function()
+                                        if debug.setupvalue then
+                                            debug.setupvalue(obj, 2, false)
+                                        end
+                                        if debug.getupvalue then
+                                            local u7 = debug.getupvalue(obj, 3)
+                                            if typeof(u7) == "function" then
+                                                u7(false)
+                                            end
+                                            local u8 = debug.getupvalue(obj, 21)
+                                            if typeof(u8) == "function" then
+                                                u8(false)
+                                            end
+                                        end
+                                    end)
+                                    if RollController and RollController.RollState then
+                                        pcall(function()
+                                            RollController.RollState(false)
+                                        end)
+                                    end
+                                    return
+                                end
+                                return oldR(p13, u14, u15, u16, p17)
+                            end))
+                        end
+                    elseif table.find(consts, "CutsceneBlackFade") or table.find(consts, "CharacterCutsceneAnimation") then
+                        if hookfunction then
+                            hookfunction(obj, wrapClosure(function(...)
+                                return
+                            end))
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+LocalPlayer:WaitForChild("PlayerGui").ChildAdded:Connect(function(child)
+    if child.Name == "CutsceneBlackFade" then
+        child:Destroy()
+    end
+end)
+
+workspace.ChildAdded:Connect(function(child)
+    if child.Name == "CameraModel" or child.Name == "lines" then
+        task.defer(function()
+            pcall(function() child:Destroy() end)
+        end)
+    end
+end)
+
+workspace.CurrentCamera:GetPropertyChangedSignal("CameraType"):Connect(function()
+    if (_G.FastRoll or _G.InstantRoll) and workspace.CurrentCamera.CameraType == Enum.CameraType.Scriptable then
+        workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        if _G.FastRoll or _G.InstantRoll then
+            pcall(function()
+                local cam = workspace.CurrentCamera
+                if cam and cam.CameraType == Enum.CameraType.Scriptable then
+                    cam.CameraType = Enum.CameraType.Custom
+                end
+            end)
+            pcall(function()
+                local char = LocalPlayer.Character
+                if char then
+                    local hrp = char:FindFirstChild("HumanoidRootPart")
+                    if hrp and hrp.Anchored then
+                        hrp.Anchored = false
+                    end
+                end
+            end)
+            pcall(function()
+                local pg = LocalPlayer:FindFirstChild("PlayerGui")
+                if pg then
+                    local fade = pg:FindFirstChild("CutsceneBlackFade")
+                    if fade then fade:Destroy() end
+                end
+            end)
+        end
+    end
+end)
+
+local function getRollRemote()
+    if RollDiceFunction then return RollDiceFunction end
+    local net = ReplicatedStorage:FindFirstChild("Network")
+    if net then
+        local rs = net:FindFirstChild("RollService")
+        if rs and rs:FindFirstChild("RollDice") then
+            return rs.RollDice
+        end
+    end
+    return nil
+end
+
+local function executeRoll()
+    local remote = getRollRemote()
+    if remote then
+        if typeof(remote) == "function" then
+            return pcall(remote)
+        elseif remote:IsA("RemoteFunction") then
+            return pcall(function()
+                return remote:InvokeServer()
+            end)
+        end
+    end
+    return false
+end
+
+pcall(function()
+    local uiRefs = require(ReplicatedStorage.Framework.Features.UI.UIReferences)
+    local rollBtn = uiRefs and uiRefs.Root and uiRefs.Root.HUD and uiRefs.Root.HUD.Bottom and uiRefs.Root.HUD.Bottom.Roll
+    if rollBtn then
+        if getconnections then
+            for _, conn in ipairs(getconnections(rollBtn.Activated)) do
+                pcall(function() conn:Disable() end)
+            end
+        end
+        rollBtn.Activated:Connect(function()
+            if _G.FastRoll or _G.InstantRoll then
+                task.spawn(executeRoll)
+            end
+        end)
+    end
+end)
+
+local activeRollWorkers = 0
+local function startRollWorker()
+    task.spawn(function()
+        activeRollWorkers = activeRollWorkers + 1
+        while _G.FastRoll do
+            pcall(executeRoll)
+            local d = _G.RollDelay or 0.01
+            if d > 0 then
+                task.wait(d)
+            else
+                task.wait()
+            end
+        end
+        activeRollWorkers = activeRollWorkers - 1
+    end)
+end
+
+local function syncRollWorkers()
+    local target = _G.FastRoll and (_G.RollThreads or 3) or 0
+    while activeRollWorkers < target do
+        startRollWorker()
+    end
+end
+
 local PlotConfig = nil
 pcall(function()
     if ReplicatedStorage:FindFirstChild("Framework") 
-       and ReplicatedStorage.Framework:FindFirstChild("Features") 
-       and ReplicatedStorage.Framework.Features:FindFirstChild("Plot") then
+    and ReplicatedStorage.Framework:FindFirstChild("Features") 
+    and ReplicatedStorage.Framework.Features:FindFirstChild("Plot") then
         PlotConfig = require(ReplicatedStorage.Framework.Features.Plot.PlotConfig)
     end
 end)
@@ -148,7 +501,6 @@ local function getMyPlot()
 end
 
 local function isSlotUnlocked(slotId)
-    if not _G.OnlyUnlocked then return true end
     if DataController and PlotConfig and PlotConfig.GetSlotRebirthRequirement and DataController.Rebirth then
         local ok, unlocked = pcall(function()
             local rebirth = DataController.Rebirth()
@@ -220,17 +572,6 @@ local function collectSlot(slotId, slotInfo)
         end
     end
 
-    if _G.TouchBypass and slotInfo and slotInfo.Hitbox and firetouchinterest then
-        pcall(function()
-            local char = LocalPlayer.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                firetouchinterest(hrp, slotInfo.Hitbox, 0)
-                task.wait(0.01)
-                firetouchinterest(hrp, slotInfo.Hitbox, 1)
-            end
-        end)
-    end
 
     return true
 end
@@ -254,170 +595,10 @@ local function collectAllSlots()
     end
 end
 
-local UIReferences = nil
-local TowerScreen = nil
-local TowerController = nil
-local TowerRefs = nil
-local Towers = nil
-
-pcall(function()
-    UIReferences = require(ReplicatedStorage.Framework.Features.UI.UIReferences)
-    if UIReferences and UIReferences.Root and UIReferences.Root.Tower then
-        TowerScreen = UIReferences.Root.Tower.Screen
-    end
-end)
-
-pcall(function()
-    TowerController = require(ReplicatedStorage.Framework.Features.Towers.TowerController)
-end)
-
-pcall(function()
-    TowerRefs = require(ReplicatedStorage.Framework.Features.Towers.TowerRefs)
-end)
-
-pcall(function()
-    Towers = require(ReplicatedStorage.Framework.Features.Towers.Towers)
-end)
-
-local function getTowerScreen()
-    if TowerScreen and TowerScreen.Parent then
-        return TowerScreen
-    end
-    pcall(function()
-        local uiRefs = require(ReplicatedStorage.Framework.Features.UI.UIReferences)
-        if uiRefs and uiRefs.Root and uiRefs.Root.Tower then
-            TowerScreen = uiRefs.Root.Tower.Screen
-        end
-    end)
-    return TowerScreen
-end
-
-local function isTowerAnimationInstance(inst)
-    if not inst then return false end
-    local name = inst.Name
-    if name == "YourCard" or name == "EnemyCard" or name == "DamagePopup" or name == "ImpactFlash" then
-        return true
-    end
-    local parent = inst.Parent
-    if parent then
-        local pName = parent.Name
-        if pName == "YourCard" or pName == "EnemyCard" or pName == "Screen" or pName == "Card" or pName == "HealthBar" or pName == "Bar" or pName == "CanvasGroup" then
-            return true
-        end
-        local pp = parent.Parent
-        if pp and (pp.Name == "YourCard" or pp.Name == "EnemyCard" or pp.Name == "Screen") then
-            return true
-        end
-    end
-    local screen = getTowerScreen()
-    if screen and (inst == screen or inst:IsDescendantOf(screen)) then
-        return true
-    end
-    return false
-end
-
-local function wrapClosure(fn)
-    if newcclosure then
-        return newcclosure(fn)
-    end
-    return fn
-end
-
-local isCaller = checkcaller or function() return false end
-
-local oldIndex = nil
-if hookmetamethod then
-    pcall(function()
-        oldIndex = hookmetamethod(game, "__index", wrapClosure(function(self, idx)
-            if _G.InstantAttack and not isCaller() and idx == "Visible" then
-                if typeof(self) == "Instance" then
-                    local name = self.Name
-                    if name == "YourCard" or name == "EnemyCard" then
-                        local isRam = true
-                        local ok, fnName = pcall(debug.info, 2, "n")
-                        if ok and type(fnName) == "string" and fnName ~= "" then
-                            isRam = (fnName == "animateRam")
-                        end
-                        if isRam and _G.AttackDelay and _G.AttackDelay > 0 then
-                            task.wait(_G.AttackDelay)
-                        end
-                        return false
-                    end
-                end
-            end
-            return oldIndex(self, idx)
-        end))
-    end)
-end
-
-local oldTweenCreate = nil
-if hookfunction then
-    pcall(function()
-        oldTweenCreate = hookfunction(TweenService.Create, wrapClosure(function(self, inst, tweenInfo, props)
-            if _G.InstantAttack and inst and typeof(inst) == "Instance" and isTowerAnimationInstance(inst) then
-                local speed = _G.AttackDelay or 0
-                local t = (speed > 0 and speed) or 0.001
-                if typeof(tweenInfo) == "TweenInfo" then
-                    tweenInfo = TweenInfo.new(t, tweenInfo.EasingStyle, tweenInfo.EasingDirection)
-                else
-                    tweenInfo = TweenInfo.new(t)
-                end
-            end
-            return oldTweenCreate(self, inst, tweenInfo, props)
-        end))
-    end)
-end
-
-local oldNamecall = nil
-if hookmetamethod then
-    pcall(function()
-        oldNamecall = hookmetamethod(game, "__namecall", wrapClosure(function(self, ...)
-            local method = getnamecallmethod()
-            if _G.InstantAttack and (method == "Create" or method == "create") and self == TweenService then
-                local args = {...}
-                local inst = args[1]
-                if inst and typeof(inst) == "Instance" and isTowerAnimationInstance(inst) then
-                    local speed = _G.AttackDelay or 0
-                    local t = (speed > 0 and speed) or 0.001
-                    if typeof(args[2]) == "TweenInfo" then
-                        args[2] = TweenInfo.new(t, args[2].EasingStyle, args[2].EasingDirection)
-                    else
-                        args[2] = TweenInfo.new(t)
-                    end
-                    if setnamecallmethod then
-                        setnamecallmethod("Create")
-                    end
-                    return oldNamecall(self, unpack(args))
-                end
-            end
-            return oldNamecall(self, ...)
-        end))
-    end)
-end
-
-local oldTaskWait = nil
-if hookfunction then
-    pcall(function()
-        oldTaskWait = hookfunction(task.wait, wrapClosure(function(n)
-            if _G.InstantAttack then
-                local ok, src = pcall(debug.info, 2, "s")
-                if ok and type(src) == "string" and (src:lower():find("tower") or src:lower():find("sequence")) then
-                    local speed = _G.AttackDelay or 0
-                    if speed > 0 then
-                        return oldTaskWait(speed)
-                    end
-                    return oldTaskWait(0)
-                end
-            end
-            return oldTaskWait(n)
-        end))
-    end)
-end
-
 local window = NeverLose:CreateWindow({
     Logo = NeverLose.GlobalLogo,
     Name = "ThanHub",
-    Content = "Auto Collect & Tower",
+    Content = "Auto Collect & Fast Roll",
     Size = UserInputService.TouchEnabled and NeverLose.Scales.Mobile or NeverLose.Scales.Default,
     ConfigFolder = "ThanHub_Config",
     Enable3DRenderer = false,
@@ -447,8 +628,8 @@ end)
 window:AddTabLabel('Main')
 
 local MainTab = window:AddTab({
-    Icon = 'coins',
-    Name = "Auto Collect",
+    Icon = 'box',
+    Name = "Main",
 })
 
 local CollectSection = MainTab:AddSection({
@@ -457,33 +638,25 @@ local CollectSection = MainTab:AddSection({
 })
 
 local AutoCollectToggle = CollectSection:AddLabel('Auto Collect')
-AutoCollectToggle:ToolTip("Otomatis mengumpulkan uang dari semua slot")
+AutoCollectToggle:ToolTip("Otomatis mengambil hasil balance dari slot plot")
 AutoCollectToggle:AddToggle({
     Default = false,
     Callback = function(Value)
         _G.AutoCollect = Value
-        if Value then
-            task.spawn(function()
-                while _G.AutoCollect do
-                    pcall(collectAllSlots)
-                    task.wait(_G.CollectDelay)
-                end
-            end)
-            NeverLose:CreateNotification().new({
-                Title = "Auto Collect",
-                Content = "Auto Collect diaktifkan",
-                Duration = 2
-            })
-        end
+        NeverLose:CreateNotification().new({
+            Title = "Auto Collect",
+            Content = Value and "Auto Collect diaktifkan" or "Auto Collect dimatikan",
+            Duration = 2
+        })
     end,
     Flag = "AutoCollectToggle",
 })
 
-local CollectSpeedSlider = CollectSection:AddLabel('Collect Delay')
-CollectSpeedSlider:ToolTip("Jeda waktu antar putaran pengumpulan")
-CollectSpeedSlider:AddSlider({
+local CollectDelaySlider = CollectSection:AddLabel('Collect Loop Delay')
+CollectDelaySlider:ToolTip("Jeda waktu antar putaran collect (detik)")
+CollectDelaySlider:AddSlider({
     Default = 0.5,
-    Min = 0.05,
+    Min = 0.1,
     Max = 3.0,
     Rounding = 2,
     Type = "s",
@@ -493,13 +666,13 @@ CollectSpeedSlider:AddSlider({
     Flag = "CollectDelaySlider",
 })
 
-local SlotDelaySlider = CollectSection:AddLabel('Slot Delay')
-SlotDelaySlider:ToolTip("Jeda waktu antar setiap slot")
+local SlotDelaySlider = CollectSection:AddLabel('Per Slot Delay')
+SlotDelaySlider:ToolTip("Jeda waktu antar pengambilan per-slot")
 SlotDelaySlider:AddSlider({
     Default = 0.02,
     Min = 0.0,
     Max = 0.2,
-    Rounding = 2,
+    Rounding = 3,
     Type = "s",
     Callback = function(Value)
         _G.SlotDelay = Value
@@ -507,35 +680,28 @@ SlotDelaySlider:AddSlider({
     Flag = "SlotDelaySlider",
 })
 
-local SmartCheckToggle = CollectSection:AddLabel('Smart Check')
-SmartCheckToggle:ToolTip("Hanya mengambil slot yang terisi uang")
-SmartCheckToggle:AddToggle({
+local SmartCollectToggle = CollectSection:AddLabel('Smart Collect')
+SmartCollectToggle:ToolTip("Hanya collect slot yang memiliki balance > 0")
+SmartCollectToggle:AddToggle({
     Default = true,
     Callback = function(Value)
         _G.SmartCollect = Value
     end,
-    Flag = "SmartCheckToggle",
+    Flag = "SmartCollectToggle",
 })
 
-local TouchBypassToggle = CollectSection:AddLabel('Hitbox Touch')
-TouchBypassToggle:ToolTip("Simulasi sentuh hitbox slot")
-TouchBypassToggle:AddToggle({
-    Default = false,
-    Callback = function(Value)
-        _G.TouchBypass = Value
-    end,
-    Flag = "TouchBypassToggle",
-})
 
 CollectSection:AddButton({
-    Name = "Collect Once",
+    Name = "Collect All Once",
     Callback = function()
-        pcall(collectAllSlots)
-        NeverLose:CreateNotification().new({
-            Title = "Collect Once",
-            Content = "Berhasil mengumpulkan uang",
-            Duration = 2
-        })
+        task.spawn(function()
+            collectAllSlots()
+            NeverLose:CreateNotification().new({
+                Title = "Auto Collect",
+                Content = "Berhasil collect seluruh slot!",
+                Duration = 2
+            })
+        end)
     end
 })
 
@@ -544,119 +710,165 @@ local UtilitySection = MainTab:AddSection({
     Position = 'right'
 })
 
-local AntiAfkToggle = UtilitySection:AddLabel('Anti AFK')
-AntiAfkToggle:ToolTip("Mencegah disconnect karena AFK")
-AntiAfkToggle:AddToggle({
+local AntiAFKToggle = UtilitySection:AddLabel('Anti AFK')
+AntiAFKToggle:ToolTip("Mencegah disconnect karena idle 20 menit")
+AntiAFKToggle:AddToggle({
     Default = true,
     Callback = function(Value)
         _G.AntiAFK = Value
+        NeverLose:CreateNotification().new({
+            Title = "Anti AFK",
+            Content = Value and "Anti AFK diaktifkan" or "Anti AFK dimatikan",
+            Duration = 2
+        })
     end,
-    Flag = "AntiAfkToggle",
+    Flag = "AntiAFKToggle",
 })
 
-pcall(function()
-    if getconnections then
-        for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
-            if conn.Disable then
-                conn:Disable()
-            elseif conn.Disconnect then
-                conn:Disconnect()
-            end
+
+task.spawn(function()
+    while true do
+        if _G.AutoCollect then
+            pcall(collectAllSlots)
+        end
+        local d = _G.CollectDelay or 0.5
+        if d > 0 then
+            task.wait(d)
+        else
+            task.wait(0.1)
         end
     end
 end)
 
-pcall(function()
-    LocalPlayer.Idled:Connect(function()
-        if _G.AntiAFK then
-            pcall(function()
-                VirtualUser:CaptureController()
-                VirtualUser:ClickButton2(Vector2.new(0, 0))
-            end)
-            pcall(function()
-                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
-                task.wait(0.05)
-                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
-            end)
-            pcall(function()
-                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-                task.wait(0.05)
-                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-            end)
-        end
-    end)
+LocalPlayer.Idled:Connect(function()
+    if _G.AntiAFK then
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new())
+        end)
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.wait(0.05)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end)
+    end
 end)
 
 task.spawn(function()
     while true do
-        task.wait(45)
+        task.wait(30)
         if _G.AntiAFK then
             pcall(function()
-                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
-                task.wait(0.05)
-                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
-            end)
-            pcall(function()
-                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-                task.wait(0.05)
-                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-            end)
-            pcall(function()
                 VirtualUser:CaptureController()
-                VirtualUser:ClickButton2(Vector2.new(0, 0))
+                VirtualUser:ClickButton2(Vector2.new())
             end)
-        end
-    end
-end)
-
-pcall(function()
-    local ps = LocalPlayer:FindFirstChild("PlayerScripts")
-    if ps then
-        for _, scr in ipairs(ps:GetDescendants()) do
-            if scr:IsA("LocalScript") and (scr.Name:lower():find("afk") or scr.Name:lower():find("idle")) then
-                scr.Disabled = true
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightControl, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightControl, false, game)
+            end)
+            pcall(function()
+                local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+                if ps then
+                    local afk = ps:FindFirstChild("AFK")
+                    if afk then
+                        pcall(function() afk.Disabled = true end)
+                        pcall(function() afk:Destroy() end)
+                    end
+                end
+            end)
+            if getgc and debug.getupvalues and debug.setupvalue then
+                pcall(function()
+                    for _, obj in ipairs(getgc(true)) do
+                        if type(obj) == "function" then
+                            local ok, consts = pcall(debug.getconstants, obj)
+                            if ok and consts and table.find(consts, 1140) then
+                                local uvs = debug.getupvalues(obj)
+                                for idx, val in pairs(uvs) do
+                                    if type(val) == "thread" then
+                                        pcall(task.cancel, val)
+                                        debug.setupvalue(obj, idx, nil)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end)
             end
         end
     end
 end)
 
-local TowerTab = window:AddTab({
-    Icon = 'swords',
-    Name = "Tower",
+local RollTab = window:AddTab({
+    Icon = 'dice-5',
+    Name = "Roll",
 })
 
-local TowerSection = TowerTab:AddSection({
-    Name = "Tower Attack",
+local RollSection = RollTab:AddSection({
+    Name = "Fast Roll",
     Position = 'left'
 })
 
-local InstantAttackToggle = TowerSection:AddLabel('Instant Attack')
-InstantAttackToggle:ToolTip("Menyerang tanpa jeda animasi ramming kartu")
-InstantAttackToggle:AddToggle({
-    Default = true,
+local FastRollToggle = RollSection:AddLabel('Fast Roll')
+FastRollToggle:ToolTip("Roll dadu otomatis super cepat tanpa animasi")
+FastRollToggle:AddToggle({
+    Default = false,
     Callback = function(Value)
-        _G.InstantAttack = Value
+        _G.FastRoll = Value
+        _G.InstantRoll = Value
+        syncRollWorkers()
         NeverLose:CreateNotification().new({
-            Title = "Tower Attack",
-            Content = Value and "Instant Attack diaktifkan" or "Instant Attack dimatikan",
+            Title = "Fast Roll",
+            Content = Value and "Fast Roll diaktifkan" or "Fast Roll dimatikan",
             Duration = 2
         })
     end,
-    Flag = "InstantAttackToggle",
+    Flag = "FastRollToggle",
 })
 
-local AttackDelaySlider = TowerSection:AddLabel('Attack Delay')
-AttackDelaySlider:ToolTip("Jeda waktu antar pukulan kartu (detik)")
-AttackDelaySlider:AddSlider({
-    Default = 0.0,
+local RollDelaySlider = RollSection:AddLabel('Roll Delay')
+RollDelaySlider:ToolTip("Jeda waktu antar roll (detik)")
+RollDelaySlider:AddSlider({
+    Default = 0.01,
     Min = 0.0,
-    Max = 0.3,
+    Max = 0.5,
     Rounding = 3,
     Type = "s",
     Callback = function(Value)
-        _G.AttackDelay = Value
+        _G.RollDelay = Value
     end,
-    Flag = "AttackDelaySlider",
+    Flag = "RollDelaySlider",
+})
+
+local RollThreadsSlider = RollSection:AddLabel('Turbo Thread')
+RollThreadsSlider:ToolTip("Jumlah thread paralel untuk Fast Roll (makin banyak makin cepat)")
+RollThreadsSlider:AddSlider({
+    Default = 3,
+    Min = 1,
+    Max = 6,
+    Rounding = 0,
+    Type = "",
+    Callback = function(Value)
+        _G.RollThreads = math.floor(Value)
+        if _G.FastRoll then
+            syncRollWorkers()
+        end
+    end,
+    Flag = "RollThreadsSlider",
+})
+
+RollSection:AddButton({
+    Name = "Roll Once",
+    Callback = function()
+        task.spawn(function()
+            local ok = executeRoll()
+            NeverLose:CreateNotification().new({
+                Title = "Roll Dice",
+                Content = ok and "Roll berhasil dikirim!" or "Gagal melakukan roll",
+                Duration = 2
+            })
+        end)
+    end
 })
 
 NeverLose:CreateNotification().new({
